@@ -32,7 +32,7 @@ const ids = [
   "movingSpeed", "movingSpeedValue", "gridSnap", "snapStep", "randomizeBtn", "resetPhasesBtn",
   "selectedInfo", "srcAmp", "srcFreq", "srcWave", "phaseUnit", "srcPhase", "srcDelay", "srcControl",
   "muteBtn", "soloBtn", "deleteBtn", "sourceList", "probeTable", "playPauseBtn", "stepBtn", "resetBtn",
-  "statusLine", "legendMin", "legendMax", "audioVolume"
+  "statusLine", "legendMin", "legendMax", "audioVolume", "audioStatus"
 ];
 const ui = Object.fromEntries(ids.map((id) => [id, el(id)]));
 
@@ -46,7 +46,7 @@ const labels = {
     resetPhases: "Reset phases", selectedSource: "Selected source", amplitude: "Amplitude", frequency: "Frequency [Hz]",
     wavelength: "Wavelength [m]", phaseUnit: "Phase unit", phase: "Phase", delay: "Delay [s]", sourceControl: "Control",
     sources: "Sources", probes: "Observation", pause: "Pause", play: "Play", step: "Step", reset: "Reset",
-    mute: "Mute", solo: "Solo", delete: "Delete", listen: "Play", stop: "Stop", playing: "Playing", audioVolume: "Audio volume",
+    mute: "Mute", solo: "Solo", delete: "Delete", listen: "Play", stop: "Stop", playing: "Playing", audioVolume: "Audio volume", audioStopped: "Audio stopped.",
     noSource: "No source selected."
   },
   ja: {
@@ -58,7 +58,7 @@ const labels = {
     resetPhases: "位相をリセット", selectedSource: "選択中の音源", amplitude: "振幅", frequency: "周波数 [Hz]",
     wavelength: "波長 [m]", phaseUnit: "位相単位", phase: "位相", delay: "遅延 [s]", sourceControl: "制御",
     sources: "音源", probes: "観測", pause: "一時停止", play: "再生", step: "ステップ", reset: "リセット",
-    mute: "ミュート", solo: "ソロ", delete: "削除", listen: "再生", stop: "停止", playing: "再生中", audioVolume: "音量",
+    mute: "ミュート", solo: "ソロ", delete: "削除", listen: "再生", stop: "停止", playing: "再生中", audioVolume: "音量", audioStopped: "音声停止中",
     noSource: "音源が選択されていません。"
   }
 };
@@ -83,7 +83,8 @@ const state = {
   dragging: null, dragMoved: false, pointers: new Map(), pinching: false, pinchStartDistance: 0, pinchStartZoom: 1,
   soundSpeed: DEFAULT_C, timeScale: 0.01, viewZoom: FIELD_SIZE / 40,
   fieldCache: null, fieldCacheKey: "",
-  audioCtx: null, audioNode: null, audioGain: null, audioInput: null, audioProbeId: null, audioTime: 0
+  audioCtx: null, audioNode: null, audioGain: null, audioInput: null, audioProbeId: null, audioTime: 0, audioNodes: [],
+  probeTableDirty: true
 };
 
 const colors = (i) => ["#22c55e", "#38bdf8", "#f97316", "#e879f9", "#fde047", "#fb7185", "#a3e635", "#60a5fa"][i % 8];
@@ -96,6 +97,7 @@ const phaseToInput = (r) => ui.phaseUnit.value === "deg" ? r * 180 / Math.PI : r
 const inputToPhase = (v) => ui.phaseUnit.value === "deg" ? v * Math.PI / 180 : v;
 
 function invalidateField() { state.fieldCache = null; }
+function markProbeTableDirty() { state.probeTableDirty = true; }
 function resetTime() { state.time = 0; for (const p of state.probes) p.history = []; invalidateField(); }
 
 function resizeCanvases() {
@@ -196,6 +198,7 @@ function addProbe(x, y) {
   const p = { id: state.nextProbeId++, x, y, color: colors(state.nextProbeId + 2), history: [] };
   state.probes.push(p);
   state.selectedProbe = p.id;
+  markProbeTableDirty();
   return p;
 }
 
@@ -555,6 +558,18 @@ function drawProbeTable() {
       </td><td>${p.x.toFixed(2)}</td><td>${p.y.toFixed(2)}</td></tr>`;
     }).join("")
   }</tbody></table>`;
+  state.probeTableDirty = false;
+  updateAudioStatus();
+}
+
+function updateAudioStatus() {
+  const dict = labels[ui.languageSelect.value];
+  if (!state.audioProbeId) {
+    ui.audioStatus.textContent = dict.audioStopped;
+    return;
+  }
+  const index = state.probes.findIndex((p) => p.id === state.audioProbeId);
+  ui.audioStatus.textContent = index >= 0 ? `${dict.playing}: P${index + 1}` : dict.audioStopped;
 }
 
 function syncSelected() {
@@ -588,6 +603,7 @@ function updateSelectedFromInputs(changed) {
   s.control = ui.srcControl.value;
   invalidateField();
   renderSourceList();
+  refreshAudioIfPlaying();
 }
 
 function renderSourceList() {
@@ -612,6 +628,8 @@ function applyLanguage() {
   for (const o of ui.presetSelect.options) o.textContent = presetLabels[lang][o.value] ?? o.textContent;
   ui.presetSelect.value = pv;
   ui.playPauseBtn.textContent = state.playing ? dict.pause : dict.play;
+  markProbeTableDirty();
+  updateAudioStatus();
   renderSourceList(); syncSelected();
 }
 
@@ -689,13 +707,22 @@ function frame(now) {
   state.lastFrame = now;
   if (state.playing) { state.time += dt * state.timeScale; animateMoving(dt); }
   updateProbeHistories();
-  drawField(); drawOverlay(); drawAxes(); drawScope(); drawSpectrum(); drawProbeTable(); updateStatus();
+  drawField(); drawOverlay(); drawAxes(); drawScope(); drawSpectrum();
+  if (state.probeTableDirty) drawProbeTable();
+  updateStatus();
   requestAnimationFrame(frame);
 }
 
 function stopAudio() {
   if (state.audioNode) { state.audioNode.disconnect(); state.audioNode.onaudioprocess = null; state.audioNode = null; }
   if (state.audioInput) { try { state.audioInput.stop(); } catch (_) {} state.audioInput.disconnect(); state.audioInput = null; }
+  for (const item of state.audioNodes) {
+    try { item.osc.stop(); } catch (_) {}
+    try { item.osc.disconnect(); } catch (_) {}
+    try { item.gain.disconnect(); } catch (_) {}
+    try { item.delay.disconnect(); } catch (_) {}
+  }
+  state.audioNodes = [];
   if (state.audioGain) { state.audioGain.disconnect(); state.audioGain = null; }
   state.audioProbeId = null;
   drawProbeTable();
@@ -716,29 +743,30 @@ async function playProbe(id) {
     return;
   }
 
-  const node = state.audioCtx.createScriptProcessor(1024, 1, 1);
-  const gain = state.audioCtx.createGain();
-  gain.gain.value = Number(ui.audioVolume.value);
-  const input = state.audioCtx.createConstantSource();
-  input.offset.value = 0;
-  state.audioTime = state.time;
-  node.onaudioprocess = (e) => {
-    const out = e.outputBuffer.getChannelData(0), sr = e.outputBuffer.sampleRate;
-    const p = state.probes.find((x) => x.id === state.audioProbeId);
-    const norm = p ? audioNormalization(p) : 1;
-    for (let i = 0; i < out.length; i++) {
-      if (!p) { out[i] = 0; continue; }
-      state.audioTime += 1 / sr;
-      out[i] = Math.max(-0.95, Math.min(0.95, pressureAt(p.x, p.y, state.audioTime) / norm));
-    }
-  };
-  input.connect(node);
-  node.connect(gain);
-  gain.connect(state.audioCtx.destination);
-  input.start();
-  state.audioNode = node;
-  state.audioGain = gain;
-  state.audioInput = input;
+  const probe = state.probes.find((p) => p.id === id);
+  if (!probe) { stopAudio(); return; }
+  const master = state.audioCtx.createGain();
+  master.gain.value = Number(ui.audioVolume.value);
+  master.connect(state.audioCtx.destination);
+  state.audioGain = master;
+  const norm = audioNormalization(probe);
+  for (const src of activeSources()) {
+    const r = Math.hypot(probe.x - src.x, probe.y - src.y);
+    const amp = Math.abs(src.amplitude * atten(r)) / norm;
+    if (amp <= 0 || src.frequency <= 0) continue;
+    const osc = state.audioCtx.createOscillator();
+    const g = state.audioCtx.createGain();
+    const d = state.audioCtx.createDelay(1.0);
+    osc.type = "sine";
+    osc.frequency.value = src.frequency;
+    g.gain.value = Math.min(0.9, amp);
+    d.delayTime.value = audioDelayFor(src, r);
+    osc.connect(g);
+    g.connect(d);
+    d.connect(master);
+    osc.start();
+    state.audioNodes.push({ osc, gain: g, delay: d });
+  }
   drawProbeTable();
 }
 
@@ -749,6 +777,21 @@ function audioNormalization(probe) {
     sum += Math.abs(s.amplitude * atten(r));
   }
   return Math.max(0.2, sum);
+}
+
+function audioDelayFor(src, r) {
+  const period = 1 / Math.max(1, src.frequency);
+  let delay;
+  if (src.control === "delay") delay = r / state.soundSpeed + src.delay;
+  else delay = r / state.soundSpeed - src.phase / TWO_PI / src.frequency;
+  delay %= period;
+  if (delay < 0) delay += period;
+  return Math.min(0.95, delay);
+}
+
+function refreshAudioIfPlaying() {
+  const id = state.audioProbeId;
+  if (id) playProbe(id);
 }
 
 overlayCanvas.addEventListener("pointerdown", (ev) => {
@@ -787,7 +830,7 @@ overlayCanvas.addEventListener("pointermove", (ev) => {
     if (s) { s.x = pos.x; s.y = pos.y; invalidateField(); syncSelected(); }
   } else {
     const p = state.probes.find((x) => x.id === state.dragging.id);
-    if (p) { p.x = pos.x; p.y = pos.y; p.history = []; }
+    if (p) { p.x = pos.x; p.y = pos.y; p.history = []; markProbeTableDirty(); }
   }
 });
 
@@ -815,6 +858,7 @@ overlayCanvas.addEventListener("dblclick", (ev) => {
     if (state.audioProbeId === probe.id) stopAudio();
     state.probes = state.probes.filter((p) => p.id !== probe.id);
     state.selectedProbe = state.probes[0]?.id ?? null;
+    markProbeTableDirty();
     return;
   }
   const src = findSource(cx, cy);
@@ -839,27 +883,29 @@ ui.movingSpeed.oninput = () => {
   ui.movingSpeedValue.textContent = `${Number(ui.movingSpeed.value).toFixed(1)} m/s`;
   for (const s of state.sources) if (s.moving) s.movingSpeed = Number(ui.movingSpeed.value);
 };
-ui.randomizeBtn.onclick = () => { for (const s of state.sources) s.phase = Math.random() * TWO_PI; invalidateField(); syncSelected(); renderSourceList(); };
-ui.resetPhasesBtn.onclick = () => { for (const s of state.sources) s.phase = 0; invalidateField(); syncSelected(); renderSourceList(); };
+ui.randomizeBtn.onclick = () => { for (const s of state.sources) s.phase = Math.random() * TWO_PI; invalidateField(); syncSelected(); renderSourceList(); refreshAudioIfPlaying(); };
+ui.resetPhasesBtn.onclick = () => { for (const s of state.sources) s.phase = 0; invalidateField(); syncSelected(); renderSourceList(); refreshAudioIfPlaying(); };
 for (const [n, c] of [[ui.srcAmp, "amp"], [ui.srcFreq, "freq"], [ui.srcWave, "wave"], [ui.srcPhase, "phase"], [ui.srcDelay, "delay"]]) n.addEventListener("input", () => updateSelectedFromInputs(c));
 ui.srcControl.onchange = () => updateSelectedFromInputs("control");
 ui.phaseUnit.onchange = () => syncSelected();
-ui.muteBtn.onclick = () => { const s = state.sources.find((x) => x.id === state.selectedSource); if (s) s.mute = !s.mute; invalidateField(); syncSelected(); renderSourceList(); };
-ui.soloBtn.onclick = () => { const s = state.sources.find((x) => x.id === state.selectedSource); if (s) s.solo = !s.solo; invalidateField(); syncSelected(); renderSourceList(); };
-ui.deleteBtn.onclick = () => { if (state.selectedSource == null) return; state.sources = state.sources.filter((s) => s.id !== state.selectedSource); state.selectedSource = state.sources[0]?.id ?? null; resetTime(); syncSelected(); renderSourceList(); };
+ui.muteBtn.onclick = () => { const s = state.sources.find((x) => x.id === state.selectedSource); if (s) s.mute = !s.mute; invalidateField(); syncSelected(); renderSourceList(); refreshAudioIfPlaying(); };
+ui.soloBtn.onclick = () => { const s = state.sources.find((x) => x.id === state.selectedSource); if (s) s.solo = !s.solo; invalidateField(); syncSelected(); renderSourceList(); refreshAudioIfPlaying(); };
+ui.deleteBtn.onclick = () => { if (state.selectedSource == null) return; state.sources = state.sources.filter((s) => s.id !== state.selectedSource); state.selectedSource = state.sources[0]?.id ?? null; resetTime(); syncSelected(); renderSourceList(); refreshAudioIfPlaying(); };
 ui.sourceList.onclick = (ev) => {
   const row = ev.target.closest(".sourceRow"); if (!row) return;
   const s = state.sources.find((x) => x.id === Number(row.dataset.id)); if (!s) return;
   state.selectedSource = s.id;
   if (ev.target.dataset.action === "mute") s.mute = !s.mute;
   if (ev.target.dataset.action === "solo") s.solo = !s.solo;
-  invalidateField(); syncSelected(); renderSourceList();
+  invalidateField(); syncSelected(); renderSourceList(); refreshAudioIfPlaying();
 };
-ui.probeTable.onclick = (ev) => {
-  const id = Number(ev.target.dataset.id); if (!id) return;
-  if (ev.target.dataset.audio === "play") playProbe(id);
-  if (ev.target.dataset.audio === "stop" && state.audioProbeId === id) stopAudio();
-};
+ui.probeTable.addEventListener("click", (ev) => {
+  const button = ev.target.closest("button[data-audio]");
+  if (!button) return;
+  const id = Number(button.dataset.id); if (!id) return;
+  if (button.dataset.audio === "play") playProbe(id);
+  if (button.dataset.audio === "stop" && state.audioProbeId === id) stopAudio();
+});
 ui.audioVolume.oninput = () => {
   if (state.audioGain) state.audioGain.gain.value = Number(ui.audioVolume.value);
 };
