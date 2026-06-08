@@ -83,7 +83,8 @@ const state = {
   dragging: null, dragMoved: false, pointers: new Map(), pinching: false, pinchStartDistance: 0, pinchStartZoom: 1,
   soundSpeed: DEFAULT_C, timeScale: 0.01, viewZoom: FIELD_SIZE / 40,
   fieldCache: null, fieldCacheKey: "",
-  audioCtx: null, audioNode: null, audioGain: null, audioInput: null, audioProbeId: null, audioTime: 0, audioNodes: [],
+  audioCtx: null, audioNode: null, audioGain: null, audioInput: null, audioProbeId: null, audioNodes: [],
+  audioDisplayTime: 0,
   probeTableDirty: true
 };
 
@@ -177,6 +178,16 @@ function sourcePositionAt(src, t) {
 function pressureAt(x, y, t) {
   let sum = 0;
   for (const s of activeSources()) sum += sourceSignal(s, x, y, t);
+  return sum;
+}
+
+function audiblePressureAt(x, y, t, phaseScale) {
+  let sum = 0;
+  for (const src of activeSources()) {
+    const emitted = emissionState(src, x, y, t);
+    const ph = src.control === "delay" ? -TWO_PI * src.frequency * src.delay : src.phase;
+    sum += src.amplitude * atten(emitted.r) * Math.sin(TWO_PI * src.frequency * emitted.tau * phaseScale + ph);
+  }
   return sum;
 }
 
@@ -601,7 +612,8 @@ function updateAudioStatus() {
     return;
   }
   const index = state.probes.findIndex((p) => p.id === state.audioProbeId);
-  ui.audioStatus.textContent = index >= 0 ? `${dict.playing}: P${index + 1}` : dict.audioStopped;
+  const pitchScale = Math.max(1, 1 / Math.max(0.001, state.timeScale));
+  ui.audioStatus.textContent = index >= 0 ? `${dict.playing}: P${index + 1} (${pitchScale.toFixed(0)}x pitch)` : dict.audioStopped;
 }
 
 function syncSelected() {
@@ -785,16 +797,18 @@ async function playProbe(id) {
   const input = state.audioCtx.createConstantSource();
   input.offset.value = 1e-6;
   gain.gain.value = Number(ui.audioVolume.value);
-  state.audioTime = state.time;
+  state.audioDisplayTime = state.time;
   node.onaudioprocess = (e) => {
     const out = e.outputBuffer.getChannelData(0);
     const sr = e.outputBuffer.sampleRate;
     const p = state.probes.find((x) => x.id === state.audioProbeId);
-    const norm = p ? audioNormalizationAt(p, state.audioTime) : 1;
+    const pitchScale = Math.max(1, 1 / Math.max(0.001, state.timeScale));
     for (let i = 0; i < out.length; i++) {
       if (!p) { out[i] = 0; continue; }
-      state.audioTime += 1 / sr;
-      const v = pressureAt(p.x, p.y, state.audioTime) / norm;
+      if (!state.playing) { out[i] = 0; continue; }
+      state.audioDisplayTime += state.timeScale / sr;
+      const norm = audioNormalizationAt(p, state.audioDisplayTime);
+      const v = audiblePressureAt(p.x, p.y, state.audioDisplayTime, pitchScale) / norm;
       out[i] = Math.max(-0.95, Math.min(0.95, v));
     }
   };
@@ -905,7 +919,7 @@ ui.sourceModeBtn.onclick = () => { state.mode = "source"; ui.sourceModeBtn.class
 ui.probeModeBtn.onclick = () => { state.mode = "probe"; ui.probeModeBtn.classList.add("active"); ui.sourceModeBtn.classList.remove("active"); };
 ui.displayMode.onchange = () => setDisplayMode(ui.displayMode.value);
 for (const input of [ui.colorScale, ui.fixedMin, ui.fixedMax, ui.colormap, ui.contours, ui.attenuation]) input.addEventListener("change", invalidateField);
-ui.timeScale.oninput = () => { state.timeScale = Number(ui.timeScale.value); ui.timeScaleValue.textContent = `${state.timeScale.toFixed(3)}x`; };
+ui.timeScale.oninput = () => { state.timeScale = Number(ui.timeScale.value); ui.timeScaleValue.textContent = `${state.timeScale.toFixed(3)}x`; updateAudioStatus(); };
 ui.soundSpeed.onchange = () => { state.soundSpeed = Math.max(1, Number(ui.soundSpeed.value) || DEFAULT_C); ui.temperature.value = soundSpeedToTemp(state.soundSpeed); syncSelected(); resetTime(); };
 ui.temperature.onchange = () => { state.soundSpeed = tempToSoundSpeed(Number(ui.temperature.value) || 0); ui.soundSpeed.value = state.soundSpeed.toFixed(1); syncSelected(); resetTime(); };
 ui.presetSelect.onchange = () => loadPreset(ui.presetSelect.value);
