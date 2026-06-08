@@ -1,8 +1,10 @@
 const FIELD_CYCLES = 24;
 const FIELD_REFERENCE_FREQ = 400;
-const DEFAULT_SOURCE_FREQ = 100;
+const DEFAULT_SOURCE_FREQ = 250;
 const DEFAULT_C = 340;
 const FIELD_SIZE = FIELD_CYCLES * (DEFAULT_C / FIELD_REFERENCE_FREQ);
+const MOVING_PATH_MIN = -20;
+const MOVING_PATH_MAX = 20;
 const MAX_SOURCES = 40;
 const MAX_PROBES = 4;
 const GRID_INSTANT = 150;
@@ -84,9 +86,142 @@ const state = {
   soundSpeed: DEFAULT_C, timeScale: 0.01, viewZoom: FIELD_SIZE / 40,
   fieldCache: null, fieldCacheKey: "",
   audioCtx: null, audioNode: null, audioGain: null, audioInput: null, audioProbeId: null, audioNodes: [],
-  audioDisplayTime: 0, audioPhaseBySource: new Map(), audioLastSample: 0, audioFadeSamples: 0,
+  audioDisplayTime: 0, audioPhaseBySource: new Map(), audioLastSample: 0, audioFadeSamples: 0, audioWorkletReady: false, audioWorkletUrl: null,
   probeTableDirty: true
 };
+
+const AUDIO_WORKLET_CODE = `
+class ProbeAudioProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.sources = [];
+    this.probe = null;
+    this.time = 0;
+    this.targetTime = 0;
+    this.timeScale = 0.01;
+    this.soundSpeed = 340;
+    this.fieldSize = 20.4;
+    this.attenuation = "none";
+    this.playing = true;
+    this.phases = new Map();
+    this.fadeSamples = 0;
+    this.port.onmessage = (ev) => {
+      const d = ev.data || {};
+      if (d.type === "config") {
+        this.sources = d.sources || [];
+        this.probe = d.probe || null;
+        this.timeScale = Math.max(0.001, d.timeScale || 0.01);
+        this.soundSpeed = Math.max(1, d.soundSpeed || 340);
+        this.fieldSize = d.fieldSize || 20.4;
+        this.attenuation = d.attenuation || "none";
+        this.playing = !!d.playing;
+        if (typeof d.time === "number") {
+          if (!this.probe || Math.abs(this.time - d.time) > 0.2) {
+            this.time = d.time;
+            this.phases.clear();
+            this.fadeSamples = 0;
+          }
+          this.targetTime = d.time;
+        }
+        const live = new Set(this.sources.map((s) => s.id));
+        for (const id of this.phases.keys()) if (!live.has(id)) this.phases.delete(id);
+      }
+      if (d.type === "sync") {
+        if (typeof d.time === "number") this.targetTime = d.time;
+        if (typeof d.playing === "boolean") this.playing = d.playing;
+      }
+    };
+  }
+
+  atten(r) {
+    const rr = r + 0.08;
+    if (this.attenuation === "inverse") return 1 / rr;
+    if (this.attenuation === "sqrt") return 1 / Math.sqrt(rr);
+    return 1;
+  }
+
+  sourcePositionAt(src, t) {
+    if (!src.moving) return { x: src.x, y: src.y };
+    const min = -this.fieldSize / 2;
+    const max = this.fieldSize / 2;
+    const span = max - min;
+    const speed = Math.max(0, src.movingSpeed || 0);
+    const start = src.motionStartX ?? src.x;
+    const dir = src.motionDirection ?? src.movingDirection ?? 1;
+    let u = ((start - min) + dir * speed * t) % (2 * span);
+    if (u < 0) u += 2 * span;
+    const x = u <= span ? min + u : max - (u - span);
+    return { x, y: src.y };
+  }
+
+  emissionState(src, x, y, t) {
+    if (!src.moving) {
+      const r = Math.hypot(x - src.x, y - src.y);
+      return { tau: t - r / this.soundSpeed, r };
+    }
+    let tau = t;
+    let r = 0;
+    for (let i = 0; i < 8; i++) {
+      const pos = this.sourcePositionAt(src, tau);
+      r = Math.hypot(x - pos.x, y - pos.y);
+      tau = t - r / this.soundSpeed;
+    }
+    return { tau, r };
+  }
+
+  normalization(t) {
+    if (!this.probe) return 1;
+    let sum = 0;
+    for (const s of this.sources) {
+      const e = this.emissionState(s, this.probe.x, this.probe.y, t);
+      sum += Math.abs((s.amplitude || 0) * this.atten(e.r));
+    }
+    return Math.max(0.2, sum);
+  }
+
+  sampleAt(t) {
+    if (!this.probe) return 0;
+    const phaseScale = Math.max(1, 1 / Math.max(0.001, this.timeScale));
+    let sum = 0;
+    for (const s of this.sources) {
+      const e = this.emissionState(s, this.probe.x, this.probe.y, t);
+      const ph = s.control === "delay" ? -2 * Math.PI * s.frequency * s.delay : s.phase;
+      let rec = this.phases.get(s.id);
+      const tauStep = rec ? e.tau - rec.tau : 0;
+      if (!rec || tauStep < -1e-5 || Math.abs(tauStep) > 0.05) {
+        rec = { tau: e.tau, phase: 2 * Math.PI * s.frequency * e.tau * phaseScale + ph };
+      } else {
+        rec.phase += 2 * Math.PI * s.frequency * phaseScale * tauStep;
+        rec.tau = e.tau;
+      }
+      this.phases.set(s.id, rec);
+      sum += (s.amplitude || 0) * this.atten(e.r) * Math.sin(rec.phase);
+    }
+    return sum / this.normalization(t);
+  }
+
+  process(_inputs, outputs) {
+    const out = outputs[0][0];
+    const simStep = Math.max(0.001, this.timeScale) / sampleRate;
+    const error = this.targetTime - this.time;
+    const correction = Math.max(-simStep * 0.02, Math.min(simStep * 0.02, error / Math.max(1, out.length)));
+    const step = Math.max(simStep * 0.95, simStep + correction);
+    for (let i = 0; i < out.length; i++) {
+      if (!this.playing || !this.probe) {
+        out[i] = 0;
+        continue;
+      }
+      this.time += step;
+      const fade = Math.min(1, this.fadeSamples / (sampleRate * 0.02));
+      const v = Math.max(-0.95, Math.min(0.95, this.sampleAt(this.time)));
+      out[i] = v * fade;
+      this.fadeSamples++;
+    }
+    return true;
+  }
+}
+registerProcessor("probe-audio-processor", ProbeAudioProcessor);
+`;
 
 const colors = (i) => ["#22c55e", "#38bdf8", "#f97316", "#e879f9", "#fde047", "#fb7185", "#a3e635", "#60a5fa"][i % 8];
 const visibleSize = () => FIELD_SIZE / state.viewZoom;
@@ -96,10 +231,44 @@ const soundSpeedToTemp = (c) => ((c - 331.3) / 0.606).toFixed(1);
 const isEditing = (n) => document.activeElement === n;
 const phaseToInput = (r) => ui.phaseUnit.value === "deg" ? r * 180 / Math.PI : r;
 const inputToPhase = (v) => ui.phaseUnit.value === "deg" ? v * Math.PI / 180 : v;
+const USE_AUDIO_WORKLET = false;
 
 function invalidateField() { state.fieldCache = null; }
 function markProbeTableDirty() { state.probeTableDirty = true; }
-function resetTime() { state.time = 0; for (const p of state.probes) p.history = []; invalidateField(); }
+
+function resetMovingSources() {
+  for (const s of state.sources) {
+    if (!s.moving) continue;
+    s.motionStartTime = 0;
+    if (s.motionMode === "oneWayLoop") s.motionStartX = s.motionMin ?? MOVING_PATH_MIN;
+    else s.motionStartX = s.x;
+    s.motionDirection = 1;
+    s.movingDirection = 1;
+    s.hidden = false;
+    const pos = sourcePositionAt(s, 0);
+    s.x = pos.x;
+    s.y = pos.y;
+  }
+}
+
+function setTimeScale(value) {
+  state.timeScale = Math.max(0.001, Math.min(Number(ui.timeScale.max) || 1, Number(value) || 0.01));
+  ui.timeScale.value = state.timeScale;
+  ui.timeScaleValue.textContent = `${state.timeScale.toFixed(3)}x`;
+  updateAudioStatus();
+  postAudioConfig();
+}
+
+function resetTime() {
+  state.time = 0;
+  resetMovingSources();
+  for (const p of state.probes) p.history = [];
+  state.audioDisplayTime = currentSimTimeEstimate();
+  state.audioPhaseBySource.clear();
+  state.audioFadeSamples = 0;
+  invalidateField();
+  postAudioConfig();
+}
 
 function currentSimTimeEstimate() {
   if (!state.playing) return state.time;
@@ -147,6 +316,7 @@ function atten(r) {
 
 function sourceSignal(src, x, y, t) {
   const emitted = emissionState(src, x, y, t);
+  if (emitted.active === false) return 0;
   const ph = src.control === "delay" ? -TWO_PI * src.frequency * src.delay : src.phase;
   return src.amplitude * atten(emitted.r) * Math.sin(TWO_PI * src.frequency * emitted.tau + ph);
 }
@@ -154,16 +324,18 @@ function sourceSignal(src, x, y, t) {
 function emissionState(src, x, y, t) {
   if (!src.moving) {
     const r = Math.hypot(x - src.x, y - src.y);
-    return { tau: t - r / state.soundSpeed, r };
+    return { tau: t - r / state.soundSpeed, r, active: true };
   }
   let tau = t;
   let r = 0;
+  let active = true;
   for (let i = 0; i < 6; i++) {
     const pos = sourcePositionAt(src, tau);
+    active = pos.active !== false;
     r = Math.hypot(x - pos.x, y - pos.y);
     tau = t - r / state.soundSpeed;
   }
-  return { tau, r };
+  return { tau, r, active };
 }
 
 function sourcePositionAt(src, t) {
@@ -173,12 +345,34 @@ function sourcePositionAt(src, t) {
   const span = max - min;
   const speed = Math.max(0, Number(ui.movingSpeed.value) || src.movingSpeed || 0);
   const start = src.motionStartX ?? src.x;
+  const startTime = src.motionStartTime ?? 0;
+  const elapsed = t - startTime;
+  if (elapsed <= 0) return { x: start, y: src.y, direction: src.motionDirection ?? src.movingDirection ?? 1, active: true };
+  if (src.motionMode === "oneWayLoop") {
+    const min = src.motionMin ?? MOVING_PATH_MIN;
+    const max = src.motionMax ?? MOVING_PATH_MAX;
+    const span = max - min;
+    const firstDistance = Math.max(0, max - start);
+    const firstTravelTime = firstDistance / Math.max(0.001, speed);
+    const travelTime = span / Math.max(0.001, speed);
+    const gapTime = src.motionGap ?? Math.min(0.3, Math.max(0.08, travelTime * 0.35));
+    if (elapsed <= firstTravelTime) {
+      const u = firstTravelTime <= 0 ? 1 : elapsed / firstTravelTime;
+      return { x: start + firstDistance * u, y: src.y, direction: 1, active: true };
+    }
+    const afterFirst = elapsed - firstTravelTime;
+    if (afterFirst <= gapTime) return { x: max, y: src.y, direction: 1, active: false };
+    const cycle = travelTime + gapTime;
+    const u = (afterFirst - gapTime) % cycle;
+    if (u > travelTime) return { x: max, y: src.y, direction: 1, active: false };
+    return { x: min + span * (u / travelTime), y: src.y, direction: 1, active: true };
+  }
   const dir = src.motionDirection ?? src.movingDirection ?? 1;
-  let u = ((start - min) + dir * speed * t) % (2 * span);
+  let u = ((start - min) + dir * speed * elapsed) % (2 * span);
   if (u < 0) u += 2 * span;
   const x = u <= span ? min + u : max - (u - span);
   const direction = u <= span ? 1 : -1;
-  return { x, y: src.y, direction };
+  return { x, y: src.y, direction, active: true };
 }
 
 function pressureAt(x, y, t) {
@@ -191,6 +385,7 @@ function audiblePressureAt(x, y, t, phaseScale) {
   let sum = 0;
   for (const src of activeSources()) {
     const emitted = emissionState(src, x, y, t);
+    if (emitted.active === false) continue;
     const ph = src.control === "delay" ? -TWO_PI * src.frequency * src.delay : src.phase;
     sum += src.amplitude * atten(emitted.r) * Math.sin(TWO_PI * src.frequency * emitted.tau * phaseScale + ph);
   }
@@ -203,6 +398,10 @@ function audiblePressureStep(x, y, t, phaseScale) {
   for (const src of activeSources()) {
     live.add(src.id);
     const emitted = emissionState(src, x, y, t);
+    if (emitted.active === false) {
+      state.audioPhaseBySource.delete(src.id);
+      continue;
+    }
     const ph = src.control === "delay" ? -TWO_PI * src.frequency * src.delay : src.phase;
     let rec = state.audioPhaseBySource.get(src.id);
     if (!rec || emitted.tau < rec.tau || Math.abs(emitted.tau - rec.tau) > 0.05) {
@@ -222,6 +421,7 @@ function rmsFastAt(x, y) {
   const groups = new Map();
   for (const s of activeSources()) {
     const pos = sourcePositionAt(s, state.time);
+    if (pos.active === false) continue;
     const r = Math.hypot(x - pos.x, y - pos.y);
     const a = s.amplitude * atten(r);
     const freq = Math.round(s.frequency * 1000) / 1000;
@@ -252,7 +452,11 @@ function addSource(x, y, o = {}) {
     movingDirection: o.movingDirection ?? 1,
     motionDirection: o.motionDirection ?? o.movingDirection ?? 1,
     motionStartX: o.motionStartX ?? x,
+    motionStartTime: o.motionStartTime ?? 0,
+    motionMode: o.motionMode ?? null,
+    motionGap: o.motionGap ?? null,
     movingSpeed: o.movingSpeed ?? Number(ui.movingSpeed.value),
+    hidden: false,
     color: colors(id - 1)
   };
   state.sources.push(src);
@@ -275,6 +479,7 @@ function addProbe(x, y) {
 function findSource(cx, cy) {
   let hit = null, best = 16 * devicePixelRatio;
   for (const s of state.sources) {
+    if (s.hidden) continue;
     const p = worldToCanvas(s.x, s.y), d = Math.hypot(cx - p.x, cy - p.y);
     if (d < best) { best = d; hit = s; }
   }
@@ -424,6 +629,7 @@ function drawOverlay() {
   octx.beginPath(); octx.moveTo(w / 2, 0); octx.lineTo(w / 2, h); octx.moveTo(0, h / 2); octx.lineTo(w, h / 2); octx.stroke();
 
   state.sources.forEach((s, i) => {
+    if (s.hidden) return;
     const p = worldToCanvas(s.x, s.y);
     octx.beginPath();
     octx.fillStyle = s.mute ? "#64748b" : s.color;
@@ -722,6 +928,7 @@ function lineSources(vertical, n, length) {
 function loadPreset(name) {
   if (!name) return;
   clearSources();
+  if (name === "moving" && state.timeScale < 0.2) setTimeScale(0.2);
   const lambda = state.soundSpeed / DEFAULT_SOURCE_FREQ, add = (x, y, o) => addSource(x, y, o);
   if (name === "single") add(0, 0);
   if (name === "twoPhase") { add(-lambda, 0); add(lambda, 0); }
@@ -739,8 +946,8 @@ function loadPreset(name) {
     }
   }
   if (name === "moving") {
-    const x0 = -FIELD_SIZE / 2 + lambda / 2;
-    add(x0, 0, { moving: true, movingDirection: 1, motionDirection: 1, motionStartX: x0, movingSpeed: Number(ui.movingSpeed.value) });
+    const x0 = MOVING_PATH_MIN;
+    add(x0, 0, { moving: true, movingDirection: 1, motionDirection: 1, motionStartX: x0, motionStartTime: 0, motionMode: "oneWayLoop", motionMin: MOVING_PATH_MIN, motionMax: MOVING_PATH_MAX, movingSpeed: Number(ui.movingSpeed.value) });
   }
   if (name === "beam") applyBeamSteering();
   ui.beamControls.classList.toggle("hidden", name !== "beam");
@@ -767,6 +974,7 @@ function animateMoving() {
     s.y = pos.y;
     s.movingDirection = pos.direction;
     s.movingSpeed = Number(ui.movingSpeed.value);
+    s.hidden = pos.active === false;
     changed = true;
   }
   if (changed) invalidateField();
@@ -784,6 +992,7 @@ function frame(now) {
   drawField(); drawOverlay(); drawAxes(); drawScope(); drawSpectrum();
   if (state.probeTableDirty) drawProbeTable();
   updateStatus();
+  syncAudioClock();
   requestAnimationFrame(frame);
 }
 
@@ -805,6 +1014,59 @@ function stopAudio() {
   drawProbeTable();
 }
 
+function audioSnapshot(probe) {
+  return {
+    probe: probe ? { x: probe.x, y: probe.y } : null,
+    sources: activeSources().map((s) => ({
+      id: s.id, x: s.x, y: s.y,
+      amplitude: s.amplitude,
+      frequency: s.frequency,
+      phase: s.phase,
+      delay: s.delay,
+      control: s.control,
+      moving: s.moving,
+      movingDirection: s.movingDirection,
+      motionDirection: s.motionDirection,
+      motionStartX: s.motionStartX,
+      motionStartTime: s.motionStartTime,
+      motionMode: s.motionMode,
+      motionGap: s.motionGap,
+      motionMin: s.motionMin,
+      motionMax: s.motionMax,
+      movingSpeed: s.moving ? Number(ui.movingSpeed.value) : s.movingSpeed
+    })),
+    time: currentSimTimeEstimate(),
+    timeScale: state.timeScale,
+    soundSpeed: state.soundSpeed,
+    fieldSize: FIELD_SIZE,
+    attenuation: ui.attenuation.value,
+    playing: state.playing
+  };
+}
+
+async function ensureAudioWorklet() {
+  if (!USE_AUDIO_WORKLET) return false;
+  if (state.audioWorkletReady) return true;
+  if (!state.audioCtx?.audioWorklet) return false;
+  const blob = new Blob([AUDIO_WORKLET_CODE], { type: "application/javascript" });
+  state.audioWorkletUrl = URL.createObjectURL(blob);
+  await state.audioCtx.audioWorklet.addModule(state.audioWorkletUrl);
+  state.audioWorkletReady = true;
+  return true;
+}
+
+function postAudioConfig() {
+  if (!state.audioNode?.port || !state.audioProbeId) return;
+  const probe = state.probes.find((p) => p.id === state.audioProbeId);
+  if (!probe) { stopAudio(); return; }
+  state.audioNode.port.postMessage({ type: "config", ...audioSnapshot(probe) });
+}
+
+function syncAudioClock() {
+  if (!state.audioNode?.port || !state.audioProbeId) return;
+  state.audioNode.port.postMessage({ type: "sync", time: currentSimTimeEstimate(), playing: state.playing });
+}
+
 async function playProbe(id) {
   stopAudio();
   const AudioCtor = window.AudioContext || window.webkitAudioContext;
@@ -822,11 +1084,26 @@ async function playProbe(id) {
 
   const probe = state.probes.find((p) => p.id === id);
   if (!probe) { stopAudio(); return; }
-  const node = state.audioCtx.createScriptProcessor(1024, 1, 1);
   const gain = state.audioCtx.createGain();
+  gain.gain.value = Number(ui.audioVolume.value);
+  state.audioGain = gain;
+  try {
+    if (await ensureAudioWorklet()) {
+      const node = new AudioWorkletNode(state.audioCtx, "probe-audio-processor", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+      node.connect(gain);
+      gain.connect(state.audioCtx.destination);
+      state.audioNode = node;
+      postAudioConfig();
+      drawProbeTable();
+      return;
+    }
+  } catch (_) {
+    state.audioWorkletReady = false;
+  }
+
+  const node = state.audioCtx.createScriptProcessor(4096, 1, 1);
   const input = state.audioCtx.createConstantSource();
   input.offset.value = 1e-6;
-  gain.gain.value = Number(ui.audioVolume.value);
   state.audioDisplayTime = currentSimTimeEstimate();
   state.audioPhaseBySource.clear();
   state.audioLastSample = 0;
@@ -837,18 +1114,19 @@ async function playProbe(id) {
     const p = state.probes.find((x) => x.id === state.audioProbeId);
     const pitchScale = Math.max(1, 1 / Math.max(0.001, state.timeScale));
     const simStep = state.timeScale / sr;
-    const syncError = currentSimTimeEstimate() - state.audioDisplayTime;
-    const correction = Math.max(-simStep * 0.5, Math.min(simStep * 0.5, syncError / Math.max(1, out.length)));
-    const displayStep = Math.max(simStep * 0.25, simStep + correction);
+    const outputLatency = ((state.audioCtx?.baseLatency || 0) + out.length / sr) * state.timeScale;
+    const targetTime = currentSimTimeEstimate() + outputLatency;
+    const syncError = targetTime - state.audioDisplayTime;
+    const correction = Math.max(-simStep * 0.05, Math.min(simStep * 0.05, syncError / Math.max(1, out.length)));
+    const displayStep = Math.max(simStep * 0.9, simStep + correction);
     for (let i = 0; i < out.length; i++) {
       if (!p) { out[i] = 0; continue; }
       if (!state.playing) { state.audioLastSample *= 0.98; out[i] = state.audioLastSample; continue; }
       state.audioDisplayTime += displayStep;
       const norm = audioNormalizationAt(p, state.audioDisplayTime);
       const v = audiblePressureStep(p.x, p.y, state.audioDisplayTime, pitchScale) / norm;
-      const fade = Math.min(1, state.audioFadeSamples / (sr * 0.03));
-      const target = Math.max(-0.95, Math.min(0.95, v)) * fade;
-      state.audioLastSample += (target - state.audioLastSample) * 0.35;
+      const fade = Math.min(1, state.audioFadeSamples / (sr * 0.02));
+      state.audioLastSample = Math.max(-0.95, Math.min(0.95, v)) * fade;
       state.audioFadeSamples += 1;
       out[i] = state.audioLastSample;
     }
@@ -871,6 +1149,7 @@ function audioNormalizationAt(probe, t) {
   let sum = 0;
   for (const s of activeSources()) {
     const emitted = emissionState(s, probe.x, probe.y, t);
+    if (emitted.active === false) continue;
     sum += Math.abs(s.amplitude * atten(emitted.r));
   }
   return Math.max(0.2, sum);
@@ -959,16 +1238,31 @@ overlayCanvas.addEventListener("dblclick", (ev) => {
 ui.sourceModeBtn.onclick = () => { state.mode = "source"; ui.sourceModeBtn.classList.add("active"); ui.probeModeBtn.classList.remove("active"); };
 ui.probeModeBtn.onclick = () => { state.mode = "probe"; ui.probeModeBtn.classList.add("active"); ui.sourceModeBtn.classList.remove("active"); };
 ui.displayMode.onchange = () => setDisplayMode(ui.displayMode.value);
-for (const input of [ui.colorScale, ui.fixedMin, ui.fixedMax, ui.colormap, ui.contours, ui.attenuation]) input.addEventListener("change", invalidateField);
-ui.timeScale.oninput = () => { state.timeScale = Number(ui.timeScale.value); ui.timeScaleValue.textContent = `${state.timeScale.toFixed(3)}x`; updateAudioStatus(); };
-ui.soundSpeed.onchange = () => { state.soundSpeed = Math.max(1, Number(ui.soundSpeed.value) || DEFAULT_C); ui.temperature.value = soundSpeedToTemp(state.soundSpeed); syncSelected(); resetTime(); };
-ui.temperature.onchange = () => { state.soundSpeed = tempToSoundSpeed(Number(ui.temperature.value) || 0); ui.soundSpeed.value = state.soundSpeed.toFixed(1); syncSelected(); resetTime(); };
+for (const input of [ui.colorScale, ui.fixedMin, ui.fixedMax, ui.colormap, ui.contours]) input.addEventListener("change", invalidateField);
+ui.attenuation.addEventListener("change", () => { invalidateField(); postAudioConfig(); });
+ui.timeScale.oninput = () => setTimeScale(ui.timeScale.value);
+ui.soundSpeed.onchange = () => { state.soundSpeed = Math.max(1, Number(ui.soundSpeed.value) || DEFAULT_C); ui.temperature.value = soundSpeedToTemp(state.soundSpeed); syncSelected(); resetTime(); postAudioConfig(); };
+ui.temperature.onchange = () => { state.soundSpeed = tempToSoundSpeed(Number(ui.temperature.value) || 0); ui.soundSpeed.value = state.soundSpeed.toFixed(1); syncSelected(); resetTime(); postAudioConfig(); };
 ui.presetSelect.onchange = () => loadPreset(ui.presetSelect.value);
 ui.beamAngle.oninput = applyBeamSteering;
 ui.beamControlMode.onchange = applyBeamSteering;
 ui.movingSpeed.oninput = () => {
-  ui.movingSpeedValue.textContent = `${Number(ui.movingSpeed.value).toFixed(1)} m/s`;
-  for (const s of state.sources) if (s.moving) s.movingSpeed = Number(ui.movingSpeed.value);
+  const speed = Number(ui.movingSpeed.value);
+  ui.movingSpeedValue.textContent = `${speed.toFixed(1)} m/s`;
+  for (const s of state.sources) {
+    if (!s.moving) continue;
+    const pos = sourcePositionAt(s, state.time);
+    s.x = pos.x;
+    s.y = pos.y;
+    s.motionStartX = pos.x;
+    s.motionStartTime = state.time;
+    s.motionDirection = pos.direction ?? s.motionDirection ?? s.movingDirection ?? 1;
+    s.movingDirection = s.motionDirection;
+    s.movingSpeed = speed;
+  }
+  invalidateField();
+  renderSourceList();
+  postAudioConfig();
 };
 ui.randomizeBtn.onclick = () => { for (const s of state.sources) s.phase = Math.random() * TWO_PI; invalidateField(); syncSelected(); renderSourceList(); refreshAudioIfPlaying(); };
 ui.resetPhasesBtn.onclick = () => { for (const s of state.sources) s.phase = 0; invalidateField(); syncSelected(); renderSourceList(); refreshAudioIfPlaying(); };
@@ -996,13 +1290,14 @@ ui.probeTable.addEventListener("click", (ev) => {
 ui.audioVolume.oninput = () => {
   if (state.audioGain) state.audioGain.gain.value = Number(ui.audioVolume.value);
 };
-ui.playPauseBtn.onclick = () => { state.playing = !state.playing; ui.playPauseBtn.textContent = state.playing ? labels[ui.languageSelect.value].pause : labels[ui.languageSelect.value].play; };
+ui.playPauseBtn.onclick = () => { state.playing = !state.playing; ui.playPauseBtn.textContent = state.playing ? labels[ui.languageSelect.value].pause : labels[ui.languageSelect.value].play; syncAudioClock(); };
 ui.stepBtn.onclick = () => { if (!state.playing) { state.time += 1 / 60 * state.timeScale; updateProbeHistories(true); } };
 ui.resetBtn.onclick = resetTime;
 ui.languageSelect.onchange = applyLanguage;
 
 applyLanguage();
 ui.temperature.value = soundSpeedToTemp(DEFAULT_C);
+setTimeScale(state.timeScale);
 setDisplayMode("instant");
 ui.presetSelect.value = "single";
 loadPreset("single");
