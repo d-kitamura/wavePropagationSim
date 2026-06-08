@@ -87,8 +87,8 @@
       <div class="section grid2">
         <label>
           <span data-i18n="timeScale">Time scale</span>
-          <input id="timeScale" type="range" min="0.05" max="2.5" step="0.05" value="0.5">
-          <b id="timeScaleValue">0.50x</b>
+          <input id="timeScale" type="range" min="0.001" max="0.25" step="0.001" value="0.01">
+          <b id="timeScaleValue">0.010x</b>
         </label>
         <label>
           <span data-i18n="attenuation">Attenuation</span>
@@ -151,7 +151,7 @@
         </label>
         <label>
           <span data-i18n="snapStep">Snap step [m]</span>
-          <input id="snapStep" type="number" value="0.85" min="0.05" step="0.05">
+          <input id="snapStep" type="number" value="3.40" min="0.05" step="0.05">
         </label>
         <button id="randomizeBtn" type="button" data-i18n="randomize">Randomize phases</button>
         <button id="resetPhasesBtn" type="button" data-i18n="resetPhases">Reset phases</button>
@@ -167,11 +167,11 @@
           </label>
           <label>
             <span data-i18n="frequency">Frequency [Hz]</span>
-            <input id="srcFreq" type="number" min="1" step="1" value="400">
+            <input id="srcFreq" type="number" min="1" step="1" value="100">
           </label>
           <label>
             <span data-i18n="wavelength">Wavelength [m]</span>
-            <input id="srcWave" type="number" min="0.01" step="0.01" value="0.85">
+            <input id="srcWave" type="number" min="0.01" step="0.01" value="3.40">
           </label>
           <label>
             <span data-i18n="phase">Phase [rad]</span>

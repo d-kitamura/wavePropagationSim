@@ -1,7 +1,8 @@
 const FIELD_CYCLES = 24;
-const BASE_FREQ = 400;
+const FIELD_REFERENCE_FREQ = 400;
+const DEFAULT_SOURCE_FREQ = 100;
 const DEFAULT_C = 340;
-const FIELD_SIZE = FIELD_CYCLES * (DEFAULT_C / BASE_FREQ);
+const FIELD_SIZE = FIELD_CYCLES * (DEFAULT_C / FIELD_REFERENCE_FREQ);
 const MAX_SOURCES = 20;
 const GRID = 160;
 const HISTORY = 320;
@@ -145,7 +146,7 @@ let state = {
   dragging: null,
   dragMoved: false,
   soundSpeed: DEFAULT_C,
-  timeScale: 0.5,
+  timeScale: 0.01,
 };
 
 function sourceColor(i) {
@@ -180,7 +181,7 @@ function canvasToWorld(px, py) {
   let wx = (x / overlayCanvas.width) * FIELD_SIZE - FIELD_SIZE / 2;
   let wy = FIELD_SIZE / 2 - (y / overlayCanvas.height) * FIELD_SIZE;
   if (ui.gridSnap.checked) {
-    const step = Math.max(0.01, Number(ui.snapStep.value) || 0.85);
+    const step = Math.max(0.01, Number(ui.snapStep.value) || state.soundSpeed / DEFAULT_SOURCE_FREQ);
     wx = Math.round(wx / step) * step;
     wy = Math.round(wy / step) * step;
   }
@@ -240,7 +241,7 @@ function addSource(x, y, opts = {}) {
     x,
     y,
     amplitude: opts.amplitude ?? 1,
-    frequency: opts.frequency ?? BASE_FREQ,
+    frequency: opts.frequency ?? DEFAULT_SOURCE_FREQ,
     phase: opts.phase ?? 0,
     delay: opts.delay ?? 0,
     control: opts.control ?? "phase",
@@ -587,10 +588,10 @@ function updateSelectedFromInputs(changed) {
   if (!src) return;
   src.amplitude = Number(ui.srcAmp.value) || 0;
   if (changed === "wave") {
-    src.frequency = state.soundSpeed / Math.max(0.01, Number(ui.srcWave.value) || 0.85);
+    src.frequency = state.soundSpeed / Math.max(0.01, Number(ui.srcWave.value) || state.soundSpeed / DEFAULT_SOURCE_FREQ);
     ui.srcFreq.value = src.frequency.toFixed(2);
   } else {
-    src.frequency = Math.max(1, Number(ui.srcFreq.value) || BASE_FREQ);
+    src.frequency = Math.max(1, Number(ui.srcFreq.value) || DEFAULT_SOURCE_FREQ);
     ui.srcWave.value = (state.soundSpeed / src.frequency).toFixed(3);
   }
   src.phase = Number(ui.srcPhase.value) || 0;
@@ -637,7 +638,7 @@ function lineSources(vertical, n, spacing, opts = {}) {
 function loadPreset(name) {
   if (!name) return;
   clearSources();
-  const lambda = state.soundSpeed / BASE_FREQ;
+  const lambda = state.soundSpeed / DEFAULT_SOURCE_FREQ;
   const add = (x, y, opts) => addSource(x, y, opts);
   if (name === "single") add(0, 0);
   if (name === "twoPhase") { add(-lambda, 0); add(lambda, 0); }
@@ -653,7 +654,7 @@ function loadPreset(name) {
     const radius = 3 * lambda;
     for (let i = 0; i < 16; i++) {
       const a = TWO_PI * i / 16;
-      const phase = name === "focus" ? TWO_PI * BASE_FREQ * radius / state.soundSpeed : name === "random" ? Math.random() * TWO_PI : 0;
+      const phase = name === "focus" ? TWO_PI * DEFAULT_SOURCE_FREQ * radius / state.soundSpeed : name === "random" ? Math.random() * TWO_PI : 0;
       add(Math.cos(a) * radius, Math.sin(a) * radius, { phase });
     }
   }
@@ -780,7 +781,7 @@ ui.probeMode.addEventListener("click", () => {
 
 ui.timeScale.addEventListener("input", () => {
   state.timeScale = Number(ui.timeScale.value);
-  ui.timeScaleValue.textContent = `${state.timeScale.toFixed(2)}x`;
+  ui.timeScaleValue.textContent = `${state.timeScale.toFixed(3)}x`;
 });
 
 ui.soundSpeed.addEventListener("change", () => {
