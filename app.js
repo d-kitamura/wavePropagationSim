@@ -139,11 +139,24 @@ function atten(r) {
 }
 
 function sourceSignal(src, x, y, t) {
-  const pos = sourcePositionAt(src, t);
-  const r = Math.hypot(x - pos.x, y - pos.y);
-  const travel = r / state.soundSpeed;
+  const emitted = emissionState(src, x, y, t);
   const ph = src.control === "delay" ? -TWO_PI * src.frequency * src.delay : src.phase;
-  return src.amplitude * atten(r) * Math.sin(TWO_PI * src.frequency * (t - travel) + ph);
+  return src.amplitude * atten(emitted.r) * Math.sin(TWO_PI * src.frequency * emitted.tau + ph);
+}
+
+function emissionState(src, x, y, t) {
+  if (!src.moving) {
+    const r = Math.hypot(x - src.x, y - src.y);
+    return { tau: t - r / state.soundSpeed, r };
+  }
+  let tau = t;
+  let r = 0;
+  for (let i = 0; i < 6; i++) {
+    const pos = sourcePositionAt(src, tau);
+    r = Math.hypot(x - pos.x, y - pos.y);
+    tau = t - r / state.soundSpeed;
+  }
+  return { tau, r };
 }
 
 function sourcePositionAt(src, t) {
@@ -170,7 +183,8 @@ function pressureAt(x, y, t) {
 function rmsFastAt(x, y) {
   const groups = new Map();
   for (const s of activeSources()) {
-    const r = Math.hypot(x - s.x, y - s.y);
+    const pos = sourcePositionAt(s, state.time);
+    const r = Math.hypot(x - pos.x, y - pos.y);
     const a = s.amplitude * atten(r);
     const freq = Math.round(s.frequency * 1000) / 1000;
     const base = s.control === "delay" ? -TWO_PI * s.frequency * s.delay : s.phase;
@@ -801,9 +815,8 @@ function audioNormalization(probe) {
 function audioNormalizationAt(probe, t) {
   let sum = 0;
   for (const s of activeSources()) {
-    const pos = sourcePositionAt(s, t);
-    const r = Math.hypot(probe.x - pos.x, probe.y - pos.y);
-    sum += Math.abs(s.amplitude * atten(r));
+    const emitted = emissionState(s, probe.x, probe.y, t);
+    sum += Math.abs(s.amplitude * atten(emitted.r));
   }
   return Math.max(0.2, sum);
 }
