@@ -84,7 +84,6 @@ const state = {
   soundSpeed: DEFAULT_C, timeScale: 0.01, viewZoom: FIELD_SIZE / 40,
   fieldCache: null, fieldCacheKey: "",
   audioCtx: null, audioNode: null, audioGain: null, audioInput: null, audioProbeId: null, audioTime: 0, audioNodes: [],
-  audioSpeed: 1,
   probeTableDirty: true
 };
 
@@ -588,8 +587,7 @@ function updateAudioStatus() {
     return;
   }
   const index = state.probes.findIndex((p) => p.id === state.audioProbeId);
-  const speed = Math.max(1, 1 / Math.max(0.001, state.timeScale));
-  ui.audioStatus.textContent = index >= 0 ? `${dict.playing}: P${index + 1} (${speed.toFixed(0)}x sim time)` : dict.audioStopped;
+  ui.audioStatus.textContent = index >= 0 ? `${dict.playing}: P${index + 1}` : dict.audioStopped;
 }
 
 function syncSelected() {
@@ -774,16 +772,14 @@ async function playProbe(id) {
   input.offset.value = 1e-6;
   gain.gain.value = Number(ui.audioVolume.value);
   state.audioTime = state.time;
-  state.audioSpeed = Math.max(1, 1 / Math.max(0.001, state.timeScale));
   node.onaudioprocess = (e) => {
     const out = e.outputBuffer.getChannelData(0);
     const sr = e.outputBuffer.sampleRate;
     const p = state.probes.find((x) => x.id === state.audioProbeId);
-    state.audioSpeed = Math.max(1, 1 / Math.max(0.001, state.timeScale));
     const norm = p ? audioNormalizationAt(p, state.audioTime) : 1;
     for (let i = 0; i < out.length; i++) {
       if (!p) { out[i] = 0; continue; }
-      state.audioTime += state.audioSpeed / sr;
+      state.audioTime += 1 / sr;
       const v = pressureAt(p.x, p.y, state.audioTime) / norm;
       out[i] = Math.max(-0.95, Math.min(0.95, v));
     }
