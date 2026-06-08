@@ -6,16 +6,21 @@ const FIELD_SIZE = FIELD_CYCLES * (DEFAULT_C / FIELD_REFERENCE_FREQ);
 const MAX_SOURCES = 20;
 const GRID = 160;
 const HISTORY = 320;
+const MAX_PROBES = 4;
 const EPS = 0.08;
 const TWO_PI = Math.PI * 2;
 
 const el = (id) => document.getElementById(id);
 const fieldCanvas = el("fieldCanvas");
 const overlayCanvas = el("overlayCanvas");
+const xAxisCanvas = el("xAxisCanvas");
+const yAxisCanvas = el("yAxisCanvas");
 const scopeCanvas = el("scopeCanvas");
 const spectrumCanvas = el("spectrumCanvas");
 const fctx = fieldCanvas.getContext("2d", { willReadFrequently: true });
 const octx = overlayCanvas.getContext("2d");
+const xctx = xAxisCanvas.getContext("2d");
+const yctx = yAxisCanvas.getContext("2d");
 const sctx = scopeCanvas.getContext("2d");
 const spctx = spectrumCanvas.getContext("2d");
 
@@ -132,6 +137,41 @@ const labels = {
   },
 };
 
+const presetLabels = {
+  en: {
+    "": "Manual",
+    single: "Single center source",
+    twoPhase: "Two sources in phase",
+    twoOpposite: "Two sources opposite phase",
+    dipole: "Dipole",
+    quadrupole: "Quadrupole",
+    verticalLine: "Vertical line array",
+    horizontalLine: "Horizontal line array",
+    beam: "Beam steering",
+    grating: "Grating lobes",
+    circular: "Circular array",
+    focus: "Circular focusing",
+    random: "Random phase array",
+    moving: "Moving source",
+  },
+  ja: {
+    "": "手動配置",
+    single: "中央1音源",
+    twoPhase: "2音源 同相",
+    twoOpposite: "2音源 逆相",
+    dipole: "ダイポール",
+    quadrupole: "四重極",
+    verticalLine: "垂直ラインアレイ",
+    horizontalLine: "水平ラインアレイ",
+    beam: "ビームステアリング",
+    grating: "グレーティングローブ",
+    circular: "円形アレイ",
+    focus: "円形フォーカシング",
+    random: "ランダム位相アレイ",
+    moving: "移動音源",
+  },
+};
+
 let state = {
   sources: [],
   probes: [],
@@ -145,8 +185,13 @@ let state = {
   nextProbeId: 1,
   dragging: null,
   dragMoved: false,
+  pointers: new Map(),
+  pinching: false,
+  pinchStartDistance: 0,
+  pinchStartZoom: 1,
   soundSpeed: DEFAULT_C,
   timeScale: 0.01,
+  viewZoom: 1,
 };
 
 function sourceColor(i) {
@@ -162,15 +207,24 @@ function tempToSoundSpeed(t) {
   return 331.3 + 0.606 * t;
 }
 
+function visibleSize() {
+  return FIELD_SIZE / state.viewZoom;
+}
+
+function setZoom(zoom) {
+  state.viewZoom = Math.max(1, Math.min(12, zoom));
+}
+
 function resetTime() {
   state.time = 0;
   for (const p of state.probes) p.history = [];
 }
 
 function worldToCanvas(x, y) {
+  const size = visibleSize();
   return {
-    x: ((x + FIELD_SIZE / 2) / FIELD_SIZE) * overlayCanvas.width,
-    y: ((FIELD_SIZE / 2 - y) / FIELD_SIZE) * overlayCanvas.height,
+    x: ((x + size / 2) / size) * overlayCanvas.width,
+    y: ((size / 2 - y) / size) * overlayCanvas.height,
   };
 }
 
@@ -178,10 +232,11 @@ function canvasToWorld(px, py) {
   const rect = overlayCanvas.getBoundingClientRect();
   const x = ((px - rect.left) / rect.width) * overlayCanvas.width;
   const y = ((py - rect.top) / rect.height) * overlayCanvas.height;
-  let wx = (x / overlayCanvas.width) * FIELD_SIZE - FIELD_SIZE / 2;
-  let wy = FIELD_SIZE / 2 - (y / overlayCanvas.height) * FIELD_SIZE;
+  const size = visibleSize();
+  let wx = (x / overlayCanvas.width) * size - size / 2;
+  let wy = size / 2 - (y / overlayCanvas.height) * size;
   if (ui.gridSnap.checked) {
-    const step = Math.max(0.01, Number(ui.snapStep.value) || state.soundSpeed / DEFAULT_SOURCE_FREQ);
+    const step = Math.max(0.01, Number(ui.snapStep.value) || (state.soundSpeed / DEFAULT_SOURCE_FREQ) / 4);
     wx = Math.round(wx / step) * step;
     wy = Math.round(wy / step) * step;
   }
@@ -248,6 +303,8 @@ function addSource(x, y, opts = {}) {
     mute: false,
     solo: false,
     moving: opts.moving ?? false,
+    movingDirection: opts.movingDirection ?? 1,
+    movingSpeed: opts.movingSpeed ?? 2.4,
     color: sourceColor(id - 1),
   };
   state.sources.push(src);
@@ -259,6 +316,7 @@ function addSource(x, y, opts = {}) {
 }
 
 function addProbe(x, y) {
+  if (state.probes.length >= MAX_PROBES) return null;
   const probe = {
     id: state.nextProbeId++,
     x,
@@ -268,6 +326,7 @@ function addProbe(x, y) {
   };
   state.probes.push(probe);
   state.selectedProbe = probe.id;
+  return probe;
 }
 
 function deleteSelected() {
@@ -315,6 +374,66 @@ function resizeCanvases() {
       c.height = size;
     }
   }
+  const axisW = Math.max(1, Math.floor(xAxisCanvas.clientWidth * devicePixelRatio));
+  const axisH = Math.max(1, Math.floor(xAxisCanvas.clientHeight * devicePixelRatio));
+  if (xAxisCanvas.width !== axisW || xAxisCanvas.height !== axisH) {
+    xAxisCanvas.width = axisW;
+    xAxisCanvas.height = axisH;
+  }
+  const yAxisW = Math.max(1, Math.floor(yAxisCanvas.clientWidth * devicePixelRatio));
+  const yAxisH = Math.max(1, Math.floor(yAxisCanvas.clientHeight * devicePixelRatio));
+  if (yAxisCanvas.width !== yAxisW || yAxisCanvas.height !== yAxisH) {
+    yAxisCanvas.width = yAxisW;
+    yAxisCanvas.height = yAxisH;
+  }
+}
+
+function niceTickStep(size) {
+  const target = size / 8;
+  const pow = Math.pow(10, Math.floor(Math.log10(target)));
+  const norm = target / pow;
+  const mult = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return mult * pow;
+}
+
+function drawAxes() {
+  const size = visibleSize();
+  const step = niceTickStep(size);
+  xctx.clearRect(0, 0, xAxisCanvas.width, xAxisCanvas.height);
+  yctx.clearRect(0, 0, yAxisCanvas.width, yAxisCanvas.height);
+  xctx.strokeStyle = yctx.strokeStyle = "#596574";
+  xctx.fillStyle = yctx.fillStyle = "#aeb8c5";
+  xctx.font = yctx.font = `${11 * devicePixelRatio}px sans-serif`;
+  xctx.textAlign = "center";
+  xctx.textBaseline = "top";
+  yctx.textAlign = "right";
+  yctx.textBaseline = "middle";
+
+  xctx.beginPath();
+  xctx.moveTo(0, 0.5 * devicePixelRatio);
+  xctx.lineTo(xAxisCanvas.width, 0.5 * devicePixelRatio);
+  xctx.stroke();
+  yctx.beginPath();
+  yctx.moveTo(yAxisCanvas.width - 0.5 * devicePixelRatio, 0);
+  yctx.lineTo(yAxisCanvas.width - 0.5 * devicePixelRatio, yAxisCanvas.height);
+  yctx.stroke();
+
+  for (let v = -Math.ceil(size / 2 / step) * step; v <= size / 2 + step * 0.5; v += step) {
+    const px = worldToCanvas(v, 0).x / overlayCanvas.width * xAxisCanvas.width;
+    xctx.beginPath();
+    xctx.moveTo(px, 0);
+    xctx.lineTo(px, 6 * devicePixelRatio);
+    xctx.stroke();
+    xctx.textAlign = px < 28 * devicePixelRatio ? "left" : px > xAxisCanvas.width - 28 * devicePixelRatio ? "right" : "center";
+    xctx.fillText(`${Math.abs(v) < 1e-9 ? 0 : v.toFixed(step < 1 ? 1 : 0)} m`, px, 9 * devicePixelRatio);
+
+    const py = worldToCanvas(0, v).y / overlayCanvas.height * yAxisCanvas.height;
+    yctx.beginPath();
+    yctx.moveTo(yAxisCanvas.width - 6 * devicePixelRatio, py);
+    yctx.lineTo(yAxisCanvas.width, py);
+    yctx.stroke();
+    yctx.fillText(`${Math.abs(v) < 1e-9 ? 0 : v.toFixed(step < 1 ? 1 : 0)} m`, yAxisCanvas.width - 9 * devicePixelRatio, py);
+  }
 }
 
 function mapColor(v, min, max) {
@@ -351,10 +470,11 @@ function drawField() {
   let min = Infinity;
   let max = -Infinity;
   const mode = ui.displayMode.value;
+  const size = visibleSize();
   for (let j = 0; j < GRID; j++) {
-    const y = FIELD_SIZE / 2 - (j / (GRID - 1)) * FIELD_SIZE;
+    const y = size / 2 - (j / (GRID - 1)) * size;
     for (let i = 0; i < GRID; i++) {
-      const x = (i / (GRID - 1)) * FIELD_SIZE - FIELD_SIZE / 2;
+      const x = (i / (GRID - 1)) * size - size / 2;
       let v = mode === "rms" ? rmsAt(x, y) : pressureAt(x, y, state.time);
       if (mode === "spl") v = 20 * Math.log10(Math.max(rmsAt(x, y), 1e-5) / 2e-5);
       const k = j * GRID + i;
@@ -425,14 +545,17 @@ function drawContours(values, min, max, mode) {
 function drawOverlay() {
   const w = overlayCanvas.width;
   const h = overlayCanvas.height;
+  const size = visibleSize();
   octx.clearRect(0, 0, w, h);
   octx.strokeStyle = "rgba(255,255,255,.18)";
   octx.lineWidth = 1;
   octx.beginPath();
-  for (let i = 1; i < FIELD_CYCLES; i++) {
-    const p = (i / FIELD_CYCLES) * w;
-    octx.moveTo(p, 0); octx.lineTo(p, h);
-    octx.moveTo(0, p); octx.lineTo(w, p);
+  const gridStep = DEFAULT_C / FIELD_REFERENCE_FREQ;
+  for (let v = -Math.ceil(size / 2 / gridStep) * gridStep; v <= size / 2 + gridStep * 0.5; v += gridStep) {
+    const px = worldToCanvas(v, 0).x;
+    const py = worldToCanvas(0, v).y;
+    octx.moveTo(px, 0); octx.lineTo(px, h);
+    octx.moveTo(0, py); octx.lineTo(w, py);
   }
   octx.stroke();
   octx.strokeStyle = "rgba(255,255,255,.45)";
@@ -502,41 +625,57 @@ function drawScope() {
 }
 
 function drawSpectrum() {
+  const panelH = 108;
+  const count = Math.max(1, state.probes.length);
+  const cssW = spectrumCanvas.clientWidth || 520;
+  const desiredW = Math.floor(cssW * devicePixelRatio);
+  const desiredH = panelH * count * devicePixelRatio;
+  if (spectrumCanvas.width !== desiredW || spectrumCanvas.height !== desiredH) {
+    spectrumCanvas.width = desiredW;
+    spectrumCanvas.height = desiredH;
+  }
   const w = spectrumCanvas.width;
   const h = spectrumCanvas.height;
   spctx.clearRect(0, 0, w, h);
-  spctx.strokeStyle = "#263241";
-  spctx.beginPath();
-  spctx.moveTo(0, h - 20); spctx.lineTo(w, h - 20);
-  spctx.stroke();
-  const probe = state.probes.find((p) => p.id === state.selectedProbe) ?? state.probes[0];
-  if (!probe || probe.history.length < 16) {
+  if (!state.probes.length) {
     spctx.fillStyle = "#9ca9b8";
+    spctx.font = `${12 * devicePixelRatio}px sans-serif`;
     spctx.fillText("Spectrum", 10, 18);
     return;
   }
-  const n = Math.min(128, probe.history.length);
-  const data = probe.history.slice(-n);
-  const mags = [];
-  for (let k = 1; k < n / 2; k++) {
-    let re = 0, im = 0;
-    for (let i = 0; i < n; i++) {
-      const a = TWO_PI * k * i / n;
-      re += data[i] * Math.cos(a);
-      im -= data[i] * Math.sin(a);
+  state.probes.forEach((probe, pi) => {
+    const top = pi * panelH * devicePixelRatio;
+    const ph = panelH * devicePixelRatio;
+    spctx.strokeStyle = "#263241";
+    spctx.strokeRect(0.5, top + 0.5, w - 1, ph - 1);
+    spctx.beginPath();
+    spctx.moveTo(0, top + ph - 20 * devicePixelRatio);
+    spctx.lineTo(w, top + ph - 20 * devicePixelRatio);
+    spctx.stroke();
+    spctx.fillStyle = "#9ca9b8";
+    spctx.font = `${12 * devicePixelRatio}px sans-serif`;
+    spctx.fillText(`P${pi + 1} spectrum`, 10 * devicePixelRatio, top + 18 * devicePixelRatio);
+    if (probe.history.length < 16) return;
+    const n = Math.min(128, probe.history.length);
+    const data = probe.history.slice(-n);
+    const mags = [];
+    for (let k = 1; k < n / 2; k++) {
+      let re = 0, im = 0;
+      for (let i = 0; i < n; i++) {
+        const a = TWO_PI * k * i / n;
+        re += data[i] * Math.cos(a);
+        im -= data[i] * Math.sin(a);
+      }
+      mags.push(Math.hypot(re, im));
     }
-    mags.push(Math.hypot(re, im));
-  }
-  const max = Math.max(...mags, 1e-6);
-  spctx.fillStyle = probe.color;
-  mags.forEach((m, i) => {
-    const x = (i / mags.length) * w;
-    const bh = (m / max) * (h - 32);
-    spctx.fillRect(x, h - 20 - bh, Math.max(1, w / mags.length - 1), bh);
+    const max = Math.max(...mags, 1e-6);
+    spctx.fillStyle = probe.color;
+    mags.forEach((m, i) => {
+      const x = (i / mags.length) * w;
+      const bh = (m / max) * (ph - 36 * devicePixelRatio);
+      spctx.fillRect(x, top + ph - 20 * devicePixelRatio - bh, Math.max(1, w / mags.length - 1), bh);
+    });
   });
-  spctx.fillStyle = "#9ca9b8";
-  spctx.font = "12px sans-serif";
-  spctx.fillText("Instant spectrum", 10, 18);
 }
 
 function updateProbeHistories() {
@@ -618,6 +757,12 @@ function applyLanguage() {
   document.querySelectorAll("[data-i18n]").forEach((node) => {
     node.textContent = dict[node.dataset.i18n] ?? node.textContent;
   });
+  const selected = ui.preset.value;
+  const presets = presetLabels[ui.language.value];
+  for (const option of ui.preset.options) {
+    option.textContent = presets[option.value] ?? option.textContent;
+  }
+  ui.preset.value = selected;
   syncSelected();
 }
 
@@ -647,18 +792,18 @@ function loadPreset(name) {
     add(-lambda / 2, -lambda / 2); add(lambda / 2, lambda / 2);
     add(lambda / 2, -lambda / 2, { phase: Math.PI }); add(-lambda / 2, lambda / 2, { phase: Math.PI });
   }
-  if (name === "verticalLine") lineSources(true, 10, lambda / 2);
-  if (name === "horizontalLine") lineSources(false, 10, lambda / 2);
-  if (name === "beam" || name === "grating") lineSources(true, 10, name === "beam" ? lambda / 2 : lambda);
+  if (name === "verticalLine") lineSources(true, 10, lambda / 4);
+  if (name === "horizontalLine") lineSources(false, 10, lambda / 4);
+  if (name === "beam" || name === "grating") lineSources(true, 10, name === "beam" ? lambda / 4 : lambda);
   if (name === "circular" || name === "focus" || name === "random") {
-    const radius = 3 * lambda;
+    const radius = 1.25 * lambda;
     for (let i = 0; i < 16; i++) {
       const a = TWO_PI * i / 16;
       const phase = name === "focus" ? TWO_PI * DEFAULT_SOURCE_FREQ * radius / state.soundSpeed : name === "random" ? Math.random() * TWO_PI : 0;
       add(Math.cos(a) * radius, Math.sin(a) * radius, { phase });
     }
   }
-  if (name === "moving") add(-FIELD_SIZE / 4, 0, { moving: true });
+  if (name === "moving") add(-FIELD_SIZE / 2 + lambda / 2, 0, { moving: true, movingDirection: 1, movingSpeed: lambda * 0.8 });
   if (name === "beam") applyBeamSteering();
   resetTime();
   syncSelected();
@@ -684,13 +829,20 @@ function applyBeamSteering() {
 function animateMovingSources(dt) {
   for (const src of state.sources) {
     if (!src.moving) continue;
-    src.x += dt * state.timeScale * 2.2;
-    if (src.x > FIELD_SIZE / 2) src.x = -FIELD_SIZE / 2;
+    src.x += dt * src.movingSpeed * src.movingDirection;
+    const limit = FIELD_SIZE / 2;
+    if (src.x > limit) {
+      src.x = limit;
+      src.movingDirection = -1;
+    } else if (src.x < -limit) {
+      src.x = -limit;
+      src.movingDirection = 1;
+    }
   }
 }
 
 function updateStatus() {
-  ui.status.textContent = `${state.sources.length} sources | t = ${state.time.toFixed(3)} s | field ${FIELD_SIZE.toFixed(2)} m x ${FIELD_SIZE.toFixed(2)} m`;
+  ui.status.textContent = `${state.sources.length} sources | t = ${state.time.toFixed(3)} s | view ${visibleSize().toFixed(2)} m x ${visibleSize().toFixed(2)} m | field ${FIELD_SIZE.toFixed(2)} m`;
 }
 
 function frame(now) {
@@ -703,6 +855,7 @@ function frame(now) {
   updateProbeHistories();
   drawField();
   drawOverlay();
+  drawAxes();
   drawScope();
   drawSpectrum();
   drawProbeTable();
@@ -712,6 +865,17 @@ function frame(now) {
 
 overlayCanvas.addEventListener("pointerdown", (ev) => {
   overlayCanvas.setPointerCapture(ev.pointerId);
+  if (ev.pointerType === "touch") {
+    state.pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (state.pointers.size >= 2) {
+      const pts = [...state.pointers.values()];
+      state.pinching = true;
+      state.dragging = null;
+      state.pinchStartDistance = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      state.pinchStartZoom = state.viewZoom;
+      return;
+    }
+  }
   const rect = overlayCanvas.getBoundingClientRect();
   const cx = ((ev.clientX - rect.left) / rect.width) * overlayCanvas.width;
   const cy = ((ev.clientY - rect.top) / rect.height) * overlayCanvas.height;
@@ -732,6 +896,16 @@ overlayCanvas.addEventListener("pointerdown", (ev) => {
 });
 
 overlayCanvas.addEventListener("pointermove", (ev) => {
+  if (state.pointers.has(ev.pointerId)) {
+    state.pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  }
+  if (state.pinching && state.pointers.size >= 2) {
+    const pts = [...state.pointers.values()];
+    const distance = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    if (state.pinchStartDistance > 0) setZoom(state.pinchStartZoom * distance / state.pinchStartDistance);
+    state.dragMoved = true;
+    return;
+  }
   if (!state.dragging) return;
   const pos = canvasToWorld(ev.clientX, ev.clientY);
   state.dragMoved = true;
@@ -745,8 +919,11 @@ overlayCanvas.addEventListener("pointermove", (ev) => {
 });
 
 overlayCanvas.addEventListener("pointerup", (ev) => {
+  const wasPinching = state.pinching;
+  state.pointers.delete(ev.pointerId);
+  if (state.pointers.size < 2) state.pinching = false;
   const pos = canvasToWorld(ev.clientX, ev.clientY);
-  if (!state.dragging && !state.dragMoved) {
+  if (!wasPinching && !state.dragging && !state.dragMoved) {
     if (state.mode === "source") addSource(pos.x, pos.y);
     else addProbe(pos.x, pos.y);
   }
@@ -754,10 +931,29 @@ overlayCanvas.addEventListener("pointerup", (ev) => {
   state.dragMoved = false;
 });
 
+overlayCanvas.addEventListener("pointercancel", (ev) => {
+  state.pointers.delete(ev.pointerId);
+  state.pinching = state.pointers.size >= 2;
+  state.dragging = null;
+  state.dragMoved = false;
+});
+
+overlayCanvas.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const factor = Math.exp(-ev.deltaY * 0.0015);
+  setZoom(state.viewZoom * factor);
+}, { passive: false });
+
 overlayCanvas.addEventListener("dblclick", (ev) => {
   const rect = overlayCanvas.getBoundingClientRect();
   const cx = ((ev.clientX - rect.left) / rect.width) * overlayCanvas.width;
   const cy = ((ev.clientY - rect.top) / rect.height) * overlayCanvas.height;
+  const probe = findProbe(cx, cy);
+  if (state.mode === "probe" && probe) {
+    state.probes = state.probes.filter((p) => p.id !== probe.id);
+    state.selectedProbe = state.probes[0]?.id ?? null;
+    return;
+  }
   const src = findSource(cx, cy);
   if (src) {
     state.sources = state.sources.filter((s) => s.id !== src.id);

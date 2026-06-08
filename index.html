@@ -20,9 +20,14 @@
           <button id="resetBtn" type="button">Reset</button>
         </div>
       </div>
-      <div class="canvasShell">
-        <canvas id="fieldCanvas" width="720" height="720" aria-label="sound field"></canvas>
-        <canvas id="overlayCanvas" width="720" height="720" aria-label="sources and probes"></canvas>
+      <div class="fieldFrame">
+        <canvas id="yAxisCanvas" width="56" height="720" aria-label="y axis"></canvas>
+        <div class="canvasShell">
+          <canvas id="fieldCanvas" width="720" height="720" aria-label="sound field"></canvas>
+          <canvas id="overlayCanvas" width="720" height="720" aria-label="sources and probes"></canvas>
+        </div>
+        <div class="axisCorner"></div>
+        <canvas id="xAxisCanvas" width="720" height="34" aria-label="x axis"></canvas>
       </div>
       <div class="legend">
         <span id="legendMin">-1.00</span>
@@ -74,7 +79,7 @@
           <span data-i18n="colormap">Colormap</span>
           <select id="colormap">
             <option value="diverging">Diverging</option>
-            <option value="thermal">Thermal</option>
+            <option value="thermal" selected>Thermal</option>
             <option value="viridis">Viridis</option>
           </select>
         </label>
@@ -151,7 +156,7 @@
         </label>
         <label>
           <span data-i18n="snapStep">Snap step [m]</span>
-          <input id="snapStep" type="number" value="3.40" min="0.05" step="0.05">
+          <input id="snapStep" type="number" value="0.85" min="0.05" step="0.05">
         </label>
         <button id="randomizeBtn" type="button" data-i18n="randomize">Randomize phases</button>
         <button id="resetPhasesBtn" type="button" data-i18n="resetPhases">Reset phases</button>
