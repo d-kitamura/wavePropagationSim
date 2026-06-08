@@ -12,200 +12,118 @@
       <div class="topbar">
         <div>
           <h1 data-i18n="title">Wave Propagation Simulator</h1>
-          <p id="statusLine">0 sources | t = 0.000 s | field 20.40 m x 20.40 m</p>
+          <p id="statusLine"></p>
         </div>
-        <div class="transport" aria-label="transport controls">
-          <button id="playPauseBtn" type="button">Pause</button>
-          <button id="stepBtn" type="button">Step</button>
-          <button id="resetBtn" type="button">Reset</button>
+        <div class="transport">
+          <button id="playPauseBtn" type="button" data-i18n="pause">Pause</button>
+          <button id="stepBtn" type="button" data-i18n="step">Step</button>
+          <button id="resetBtn" type="button" data-i18n="reset">Reset</button>
         </div>
       </div>
       <div class="fieldFrame">
-        <canvas id="yAxisCanvas" width="56" height="720" aria-label="y axis"></canvas>
+        <canvas id="yAxisCanvas"></canvas>
         <div class="canvasShell">
-          <canvas id="fieldCanvas" width="720" height="720" aria-label="sound field"></canvas>
-          <canvas id="overlayCanvas" width="720" height="720" aria-label="sources and probes"></canvas>
+          <canvas id="fieldCanvas"></canvas>
+          <canvas id="overlayCanvas"></canvas>
         </div>
         <div class="axisCorner"></div>
-        <canvas id="xAxisCanvas" width="720" height="34" aria-label="x axis"></canvas>
+        <canvas id="xAxisCanvas"></canvas>
       </div>
       <div class="legend">
         <span id="legendMin">-1.00</span>
-        <div class="legendBar"></div>
+        <div id="legendBar" class="legendBar"></div>
         <span id="legendMax">1.00</span>
       </div>
     </section>
 
     <aside class="panel">
       <div class="section compact">
-        <label>
-          <span data-i18n="language">Language</span>
+        <label><span data-i18n="language">Language</span>
           <select id="languageSelect">
             <option value="en">English</option>
             <option value="ja">日本語</option>
           </select>
         </label>
         <div class="segmented">
-          <button id="sourceModeBtn" class="active" type="button" data-mode="source" data-i18n="sourceMode">Source mode</button>
-          <button id="probeModeBtn" type="button" data-mode="probe" data-i18n="probeMode">Probe mode</button>
+          <button id="sourceModeBtn" class="active" type="button" data-i18n="sourceMode">Source mode</button>
+          <button id="probeModeBtn" type="button" data-i18n="probeMode">Probe mode</button>
         </div>
       </div>
 
       <div class="section grid2">
-        <label>
-          <span data-i18n="display">Display</span>
+        <label><span data-i18n="display">Display</span>
           <select id="displayMode">
             <option value="instant">Instant pressure</option>
             <option value="rms">RMS pressure</option>
             <option value="spl">SPL</option>
           </select>
         </label>
-        <label>
-          <span data-i18n="colorScale">Color scale</span>
+        <label><span data-i18n="colorScale">Color scale</span>
           <select id="colorScale">
             <option value="auto">Auto</option>
             <option value="fixed">Fixed</option>
           </select>
         </label>
-        <label>
-          <span data-i18n="fixedMin">Fixed min</span>
-          <input id="fixedMin" type="number" value="-1" step="0.1">
-        </label>
-        <label>
-          <span data-i18n="fixedMax">Fixed max</span>
-          <input id="fixedMax" type="number" value="1" step="0.1">
-        </label>
-        <label>
-          <span data-i18n="colormap">Colormap</span>
+        <label><span data-i18n="fixedMin">Fixed min</span><input id="fixedMin" type="number" value="-1" step="0.1"></label>
+        <label><span data-i18n="fixedMax">Fixed max</span><input id="fixedMax" type="number" value="1" step="0.1"></label>
+        <label><span data-i18n="colormap">Colormap</span>
           <select id="colormap">
             <option value="diverging">Diverging</option>
             <option value="thermal" selected>Thermal</option>
             <option value="viridis">Viridis</option>
           </select>
         </label>
-        <label class="check">
-          <input id="contours" type="checkbox">
-          <span data-i18n="contours">Contours / nodal lines</span>
-        </label>
+        <label class="check"><input id="contours" type="checkbox"><span data-i18n="contours">Contours / nodal lines</span></label>
       </div>
 
       <div class="section grid2">
-        <label>
-          <span data-i18n="timeScale">Time scale</span>
-          <input id="timeScale" type="range" min="0.001" max="0.25" step="0.001" value="0.01">
-          <b id="timeScaleValue">0.010x</b>
+        <label><span data-i18n="timeScale">Time scale</span><input id="timeScale" type="range" min="0.001" max="0.25" step="0.001" value="0.01"><b id="timeScaleValue">0.010x</b></label>
+        <label><span data-i18n="attenuation">Attenuation</span>
+          <select id="attenuation"><option value="none">None</option><option value="inverse">1 / r</option><option value="sqrt">1 / sqrt(r)</option></select>
         </label>
-        <label>
-          <span data-i18n="attenuation">Attenuation</span>
-          <select id="attenuation">
-            <option value="none">None</option>
-            <option value="inverse">1 / r</option>
-            <option value="sqrt">1 / sqrt(r)</option>
-          </select>
-        </label>
-        <label>
-          <span data-i18n="soundSpeed">Sound speed [m/s]</span>
-          <input id="soundSpeed" type="number" value="340" min="1" step="1">
-        </label>
-        <label>
-          <span data-i18n="temperature">Temperature [C]</span>
-          <input id="temperature" type="number" value="14.0" step="0.1">
-        </label>
+        <label><span data-i18n="soundSpeed">Sound speed [m/s]</span><input id="soundSpeed" type="number" value="340" min="1" step="1"></label>
+        <label><span data-i18n="temperature">Temperature [C]</span><input id="temperature" type="number" value="14.4" step="0.1"></label>
       </div>
 
       <div class="section">
-        <label>
-          <span data-i18n="preset">Preset</span>
+        <label><span data-i18n="preset">Preset</span>
           <select id="presetSelect">
-            <option value="">Manual</option>
-            <option value="single">Single center source</option>
-            <option value="twoPhase">Two sources in phase</option>
-            <option value="twoOpposite">Two sources opposite phase</option>
-            <option value="dipole">Dipole</option>
-            <option value="quadrupole">Quadrupole</option>
-            <option value="verticalLine">Vertical line array</option>
-            <option value="horizontalLine">Horizontal line array</option>
-            <option value="beam">Beam steering</option>
-            <option value="grating">Grating lobes</option>
-            <option value="circular">Circular array</option>
-            <option value="focus">Circular focusing</option>
-            <option value="random">Random phase array</option>
-            <option value="moving">Moving source</option>
+            <option value="">Manual</option><option value="single">Single center source</option><option value="twoPhase">Two sources in phase</option><option value="twoOpposite">Two sources opposite phase</option><option value="dipole">Dipole</option><option value="quadrupole">Quadrupole</option><option value="verticalLine">Vertical line array</option><option value="horizontalLine">Horizontal line array</option><option value="beam">Beam steering</option><option value="grating">Grating lobes</option><option value="circular">Circular array</option><option value="focus">Circular focusing</option><option value="random">Random phase array</option><option value="moving">Moving source</option>
           </select>
         </label>
         <div id="beamControls" class="beamControls hidden">
-          <label>
-            <span data-i18n="beamAngle">Steering angle [deg]</span>
-            <input id="beamAngle" type="range" min="-75" max="75" step="1" value="25">
-            <b id="beamAngleValue">25 deg</b>
-          </label>
-          <label>
-            <span data-i18n="controlMode">Control</span>
-            <select id="beamControlMode">
-              <option value="phase">Phase shift</option>
-              <option value="delay">Time delay</option>
-            </select>
-          </label>
+          <label><span data-i18n="beamAngle">Steering angle [deg]</span><input id="beamAngle" type="range" min="-75" max="75" step="1" value="25"><b id="beamAngleValue">25 deg</b></label>
+          <label><span data-i18n="controlMode">Control</span><select id="beamControlMode"><option value="phase">Phase shift</option><option value="delay">Time delay</option></select></label>
         </div>
       </div>
 
       <div class="section grid2">
-        <label class="check">
-          <input id="gridSnap" type="checkbox">
-          <span data-i18n="gridSnap">Grid snap</span>
-        </label>
-        <label>
-          <span data-i18n="snapStep">Snap step [m]</span>
-          <input id="snapStep" type="number" value="0.85" min="0.05" step="0.05">
-        </label>
+        <label class="check"><input id="gridSnap" type="checkbox"><span data-i18n="gridSnap">Grid snap</span></label>
+        <label><span data-i18n="snapStep">Snap step [m]</span><input id="snapStep" type="number" value="0.85" min="0.05" step="0.05"></label>
         <button id="randomizeBtn" type="button" data-i18n="randomize">Randomize phases</button>
         <button id="resetPhasesBtn" type="button" data-i18n="resetPhases">Reset phases</button>
       </div>
 
       <div class="section">
         <h2 data-i18n="selectedSource">Selected source</h2>
-        <div id="selectedInfo" class="muted">No source selected.</div>
+        <div id="selectedInfo" class="muted"></div>
         <div class="grid2">
-          <label>
-            <span data-i18n="amplitude">Amplitude</span>
-            <input id="srcAmp" type="number" step="0.05" value="1">
-          </label>
-          <label>
-            <span data-i18n="frequency">Frequency [Hz]</span>
-            <input id="srcFreq" type="number" min="1" step="1" value="100">
-          </label>
-          <label>
-            <span data-i18n="wavelength">Wavelength [m]</span>
-            <input id="srcWave" type="number" min="0.01" step="0.01" value="3.40">
-          </label>
-          <label>
-            <span data-i18n="phase">Phase [rad]</span>
-            <input id="srcPhase" type="number" step="0.1" value="0">
-          </label>
-          <label>
-            <span data-i18n="delay">Delay [s]</span>
-            <input id="srcDelay" type="number" step="0.0001" value="0">
-          </label>
-          <label>
-            <span data-i18n="sourceControl">Control</span>
-            <select id="srcControl">
-              <option value="phase">Phase</option>
-              <option value="delay">Delay</option>
-            </select>
-          </label>
+          <label><span data-i18n="amplitude">Amplitude</span><input id="srcAmp" type="number" step="0.05" value="1"></label>
+          <label><span data-i18n="frequency">Frequency [Hz]</span><input id="srcFreq" type="number" min="1" step="1" value="100"></label>
+          <label><span data-i18n="wavelength">Wavelength [m]</span><input id="srcWave" type="number" min="0.01" step="0.01" value="3.40"></label>
+          <label><span data-i18n="phaseUnit">Phase unit</span><select id="phaseUnit"><option value="rad">rad</option><option value="deg">degree</option></select></label>
+          <label><span data-i18n="phase">Phase</span><input id="srcPhase" type="number" step="0.1" value="0"></label>
+          <label><span data-i18n="delay">Delay [s]</span><input id="srcDelay" type="number" step="0.0001" value="0"></label>
+          <label><span data-i18n="sourceControl">Control</span><select id="srcControl"><option value="phase">Phase</option><option value="delay">Delay</option></select></label>
         </div>
         <div class="actions">
-          <button id="muteBtn" type="button">Mute</button>
-          <button id="soloBtn" type="button">Solo</button>
-          <button id="deleteBtn" type="button">Delete</button>
+          <button id="muteBtn" type="button" data-i18n="mute">Mute</button>
+          <button id="soloBtn" type="button" data-i18n="solo">Solo</button>
+          <button id="deleteBtn" type="button" data-i18n="delete">Delete</button>
         </div>
       </div>
 
-      <div class="section">
-        <h2 data-i18n="sources">Sources</h2>
-        <div id="sourceList" class="sourceList"></div>
-      </div>
-
+      <div class="section"><h2 data-i18n="sources">Sources</h2><div id="sourceList" class="sourceList"></div></div>
       <div class="section">
         <h2 data-i18n="probes">Observation</h2>
         <canvas id="scopeCanvas" width="520" height="160"></canvas>
@@ -214,7 +132,6 @@
       </div>
     </aside>
   </main>
-
   <script src="app.js"></script>
 </body>
 </html>
