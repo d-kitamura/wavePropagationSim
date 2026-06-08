@@ -32,7 +32,7 @@ const ids = [
   "movingSpeed", "movingSpeedValue", "gridSnap", "snapStep", "randomizeBtn", "resetPhasesBtn",
   "selectedInfo", "srcAmp", "srcFreq", "srcWave", "phaseUnit", "srcPhase", "srcDelay", "srcControl",
   "muteBtn", "soloBtn", "deleteBtn", "sourceList", "probeTable", "playPauseBtn", "stepBtn", "resetBtn",
-  "statusLine", "legendMin", "legendMax"
+  "statusLine", "legendMin", "legendMax", "audioVolume"
 ];
 const ui = Object.fromEntries(ids.map((id) => [id, el(id)]));
 
@@ -46,7 +46,7 @@ const labels = {
     resetPhases: "Reset phases", selectedSource: "Selected source", amplitude: "Amplitude", frequency: "Frequency [Hz]",
     wavelength: "Wavelength [m]", phaseUnit: "Phase unit", phase: "Phase", delay: "Delay [s]", sourceControl: "Control",
     sources: "Sources", probes: "Observation", pause: "Pause", play: "Play", step: "Step", reset: "Reset",
-    mute: "Mute", solo: "Solo", delete: "Delete", listen: "Play", stop: "Stop", playing: "Playing",
+    mute: "Mute", solo: "Solo", delete: "Delete", listen: "Play", stop: "Stop", playing: "Playing", audioVolume: "Audio volume",
     noSource: "No source selected."
   },
   ja: {
@@ -58,7 +58,7 @@ const labels = {
     resetPhases: "位相をリセット", selectedSource: "選択中の音源", amplitude: "振幅", frequency: "周波数 [Hz]",
     wavelength: "波長 [m]", phaseUnit: "位相単位", phase: "位相", delay: "遅延 [s]", sourceControl: "制御",
     sources: "音源", probes: "観測", pause: "一時停止", play: "再生", step: "ステップ", reset: "リセット",
-    mute: "ミュート", solo: "ソロ", delete: "削除", listen: "再生", stop: "停止", playing: "再生中",
+    mute: "ミュート", solo: "ソロ", delete: "削除", listen: "再生", stop: "停止", playing: "再生中", audioVolume: "音量",
     noSource: "音源が選択されていません。"
   }
 };
@@ -83,7 +83,7 @@ const state = {
   dragging: null, dragMoved: false, pointers: new Map(), pinching: false, pinchStartDistance: 0, pinchStartZoom: 1,
   soundSpeed: DEFAULT_C, timeScale: 0.01, viewZoom: FIELD_SIZE / 40,
   fieldCache: null, fieldCacheKey: "",
-  audioCtx: null, audioNode: null, audioGain: null, audioProbeId: null, audioTime: 0
+  audioCtx: null, audioNode: null, audioGain: null, audioInput: null, audioProbeId: null, audioTime: 0
 };
 
 const colors = (i) => ["#22c55e", "#38bdf8", "#f97316", "#e879f9", "#fde047", "#fb7185", "#a3e635", "#60a5fa"][i % 8];
@@ -300,6 +300,19 @@ function niceStep(size) {
   return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p;
 }
 
+function niceFrequencyStep(target) {
+  const p = 10 ** Math.floor(Math.log10(Math.max(target, 1e-6)));
+  const n = target / p;
+  const m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+  return m * p;
+}
+
+function formatKHz(v) {
+  if (v >= 1) return v.toFixed(1).replace(/\.0$/, "");
+  if (v >= 0.1) return v.toFixed(1);
+  return v.toFixed(2);
+}
+
 function drawAxes() {
   const size = visibleSize(), step = niceStep(size);
   xctx.clearRect(0, 0, xAxisCanvas.width, xAxisCanvas.height);
@@ -373,7 +386,7 @@ function scopeWindow() {
 
 function drawScope() {
   const w = scopeCanvas.width, h = scopeCanvas.height;
-  const left = 42, right = 8, top = 10, bottom = 28;
+  const left = 48, right = 8, top = 10, bottom = 42;
   const pw = w - left - right, ph = h - top - bottom;
   const win = scopeWindow();
 
@@ -397,7 +410,7 @@ function drawScope() {
     sctx.beginPath(); sctx.moveTo(x, top); sctx.lineTo(x, top + ph); sctx.stroke();
     sctx.fillStyle = "#9ca9b8";
     sctx.textAlign = "center";
-    sctx.fillText(t.toFixed(3), x, h - 10);
+    sctx.fillText(t.toFixed(3), x, h - 24);
   }
   for (let i = 0; i <= 4; i++) {
     const y = top + (i / 4) * ph;
@@ -425,7 +438,7 @@ function drawScope() {
 
   sctx.fillStyle = "#9ca9b8";
   sctx.textAlign = "right";
-  sctx.fillText("Time [s]", w - 8, h - 10);
+  sctx.fillText("Time [s]", w - 8, h - 7);
   sctx.save();
   sctx.translate(12, top + ph / 2 + 22);
   sctx.rotate(-Math.PI / 2);
@@ -435,7 +448,7 @@ function drawScope() {
 }
 
 function drawSpectrum() {
-  const panelH = 138, count = Math.max(1, state.probes.length);
+  const panelH = 150, count = Math.max(1, state.probes.length);
   const dw = Math.floor((spectrumCanvas.clientWidth || 520) * devicePixelRatio);
   const dh = panelH * count * devicePixelRatio;
   if (spectrumCanvas.width !== dw || spectrumCanvas.height !== dh) { spectrumCanvas.width = dw; spectrumCanvas.height = dh; }
@@ -452,8 +465,8 @@ function drawSpectrum() {
     const w = spectrumCanvas.width;
     const topPx = pi * panelH * devicePixelRatio;
     const ph = panelH * devicePixelRatio;
-    const left = 42 * devicePixelRatio, right = 10 * devicePixelRatio, top = topPx + 12 * devicePixelRatio, bottom = 32 * devicePixelRatio;
-    const pw = w - left - right, gh = ph - 44 * devicePixelRatio;
+    const left = 48 * devicePixelRatio, right = 10 * devicePixelRatio, top = topPx + 12 * devicePixelRatio, bottom = 44 * devicePixelRatio;
+    const pw = w - left - right, gh = ph - 56 * devicePixelRatio;
     const base = top + gh;
     const data = p.history.slice(-128);
     const duration = data.length > 1 ? data[data.length - 1].t - data[0].t : 0;
@@ -473,21 +486,24 @@ function drawSpectrum() {
         mags.push({ f: (k * fs / n) / 1000, m: Math.hypot(re, im) });
       }
     }
-    const maxFreq = Math.max(0.25, ...mags.map((m) => m.f));
+    const rawMaxFreq = Math.max(0.25, ...mags.map((m) => m.f));
+    const freqStep = niceFrequencyStep(rawMaxFreq / 4);
+    const maxFreq = Math.max(freqStep, Math.ceil(rawMaxFreq / freqStep) * freqStep);
     const maxAmp = Math.max(1e-6, ...mags.map((m) => m.m));
 
     spctx.strokeStyle = "#263241";
     spctx.strokeRect(0.5, topPx + 0.5, w - 1, ph - 1);
     spctx.beginPath(); spctx.moveTo(left, base); spctx.lineTo(left + pw, base); spctx.moveTo(left, top); spctx.lineTo(left, base); spctx.stroke();
 
-    for (let i = 0; i <= 4; i++) {
-      const x = left + (i / 4) * pw;
-      const f = (i / 4) * maxFreq;
+    const tickCount = Math.round(maxFreq / freqStep);
+    for (let i = 0; i <= tickCount; i++) {
+      const f = i * freqStep;
+      const x = left + (f / maxFreq) * pw;
       spctx.strokeStyle = "rgba(255,255,255,.08)";
       spctx.beginPath(); spctx.moveTo(x, top); spctx.lineTo(x, base); spctx.stroke();
       spctx.fillStyle = "#9ca9b8";
       spctx.textAlign = "center";
-      spctx.fillText(f.toFixed(2), x, topPx + ph - 12 * devicePixelRatio);
+      spctx.fillText(formatKHz(f), x, topPx + ph - 28 * devicePixelRatio);
     }
     for (let i = 0; i <= 3; i++) {
       const y = base - (i / 3) * gh;
@@ -503,7 +519,7 @@ function drawSpectrum() {
     spctx.textAlign = "left";
     spctx.fillText(`P${pi + 1}`, 8 * devicePixelRatio, topPx + 18 * devicePixelRatio);
     spctx.textAlign = "right";
-    spctx.fillText("Frequency [kHz]", w - 8 * devicePixelRatio, topPx + ph - 12 * devicePixelRatio);
+    spctx.fillText("Frequency [kHz]", w - 8 * devicePixelRatio, topPx + ph - 8 * devicePixelRatio);
     spctx.save();
     spctx.translate(12 * devicePixelRatio, top + gh / 2);
     spctx.rotate(-Math.PI / 2);
@@ -679,36 +695,60 @@ function frame(now) {
 
 function stopAudio() {
   if (state.audioNode) { state.audioNode.disconnect(); state.audioNode.onaudioprocess = null; state.audioNode = null; }
+  if (state.audioInput) { try { state.audioInput.stop(); } catch (_) {} state.audioInput.disconnect(); state.audioInput = null; }
   if (state.audioGain) { state.audioGain.disconnect(); state.audioGain = null; }
   state.audioProbeId = null;
+  drawProbeTable();
 }
 
 async function playProbe(id) {
   stopAudio();
   const AudioCtor = window.AudioContext || window.webkitAudioContext;
   if (!AudioCtor) return;
-  state.audioCtx = state.audioCtx || new AudioCtor();
-  await state.audioCtx.resume();
-
-  const node = state.audioCtx.createScriptProcessor(1024, 0, 1);
-  const gain = state.audioCtx.createGain();
-  gain.gain.value = 0.22;
   state.audioProbeId = id;
+  drawProbeTable();
+  state.audioCtx = state.audioCtx || new AudioCtor();
+  try {
+    await state.audioCtx.resume();
+  } catch (_) {
+    state.audioProbeId = null;
+    drawProbeTable();
+    return;
+  }
+
+  const node = state.audioCtx.createScriptProcessor(1024, 1, 1);
+  const gain = state.audioCtx.createGain();
+  gain.gain.value = Number(ui.audioVolume.value);
+  const input = state.audioCtx.createConstantSource();
+  input.offset.value = 0;
   state.audioTime = state.time;
   node.onaudioprocess = (e) => {
     const out = e.outputBuffer.getChannelData(0), sr = e.outputBuffer.sampleRate;
     const p = state.probes.find((x) => x.id === state.audioProbeId);
+    const norm = p ? audioNormalization(p) : 1;
     for (let i = 0; i < out.length; i++) {
       if (!p) { out[i] = 0; continue; }
       state.audioTime += 1 / sr;
-      out[i] = Math.max(-0.95, Math.min(0.95, pressureAt(p.x, p.y, state.audioTime) * 0.15));
+      out[i] = Math.max(-0.95, Math.min(0.95, pressureAt(p.x, p.y, state.audioTime) / norm));
     }
   };
+  input.connect(node);
   node.connect(gain);
   gain.connect(state.audioCtx.destination);
+  input.start();
   state.audioNode = node;
   state.audioGain = gain;
+  state.audioInput = input;
   drawProbeTable();
+}
+
+function audioNormalization(probe) {
+  let sum = 0;
+  for (const s of activeSources()) {
+    const r = Math.hypot(probe.x - s.x, probe.y - s.y);
+    sum += Math.abs(s.amplitude * atten(r));
+  }
+  return Math.max(0.2, sum);
 }
 
 overlayCanvas.addEventListener("pointerdown", (ev) => {
@@ -818,7 +858,10 @@ ui.sourceList.onclick = (ev) => {
 ui.probeTable.onclick = (ev) => {
   const id = Number(ev.target.dataset.id); if (!id) return;
   if (ev.target.dataset.audio === "play") playProbe(id);
-  if (ev.target.dataset.audio === "stop" && state.audioProbeId === id) { stopAudio(); drawProbeTable(); }
+  if (ev.target.dataset.audio === "stop" && state.audioProbeId === id) stopAudio();
+};
+ui.audioVolume.oninput = () => {
+  if (state.audioGain) state.audioGain.gain.value = Number(ui.audioVolume.value);
 };
 ui.playPauseBtn.onclick = () => { state.playing = !state.playing; ui.playPauseBtn.textContent = state.playing ? labels[ui.languageSelect.value].pause : labels[ui.languageSelect.value].play; };
 ui.stepBtn.onclick = () => { if (!state.playing) { state.time += 1 / 60 * state.timeScale; updateProbeHistories(true); } };
