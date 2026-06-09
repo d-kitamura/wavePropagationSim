@@ -209,12 +209,14 @@ class ProbeAudioProcessor extends AudioWorkletProcessor {
   sampleAt(t) {
     if (!this.probe) return 0;
     const phaseScale = Math.max(1, 1 / Math.max(0.001, this.timeScale));
+    const carrierTime = this.simAnchor + (t - this.simAnchor) * phaseScale;
     let sum = 0;
     for (const s of this.sources) {
       const e = this.emissionState(s, this.probe.x, this.probe.y, t);
       if (e.active === false) continue;
       const ph = s.control === "delay" ? -2 * Math.PI * s.frequency * s.delay : s.phase;
-      sum += (s.amplitude || 0) * this.atten(e.r) * Math.sin(2 * Math.PI * s.frequency * e.tau * phaseScale + ph);
+      const delayedTime = s.moving ? this.simAnchor + (e.tau - this.simAnchor) * phaseScale : carrierTime + (e.tau - t);
+      sum += (s.amplitude || 0) * this.atten(e.r) * Math.sin(2 * Math.PI * s.frequency * delayedTime + ph);
     }
     return sum / this.normalization(t);
   }
@@ -423,11 +425,14 @@ function pressureAt(x, y, t) {
 
 function audiblePressureAt(x, y, t, phaseScale) {
   let sum = 0;
+  const anchor = state.audioSimAnchor ?? t;
+  const carrierTime = anchor + (t - anchor) * phaseScale;
   for (const src of activeSources()) {
     const emitted = emissionState(src, x, y, t);
     if (emitted.active === false) continue;
     const ph = src.control === "delay" ? -TWO_PI * src.frequency * src.delay : src.phase;
-    sum += src.amplitude * atten(emitted.r) * Math.sin(TWO_PI * src.frequency * emitted.tau * phaseScale + ph);
+    const delayedTime = src.moving ? anchor + (emitted.tau - anchor) * phaseScale : carrierTime + (emitted.tau - t);
+    sum += src.amplitude * atten(emitted.r) * Math.sin(TWO_PI * src.frequency * delayedTime + ph);
   }
   return sum;
 }
@@ -435,6 +440,8 @@ function audiblePressureAt(x, y, t, phaseScale) {
 function audiblePressureStep(x, y, t, phaseScale) {
   let sum = 0;
   const live = new Set();
+  const anchor = state.audioSimAnchor ?? t;
+  const carrierTime = anchor + (t - anchor) * phaseScale;
   for (const src of activeSources()) {
     live.add(src.id);
     const emitted = emissionState(src, x, y, t);
@@ -443,11 +450,12 @@ function audiblePressureStep(x, y, t, phaseScale) {
       continue;
     }
     const ph = src.control === "delay" ? -TWO_PI * src.frequency * src.delay : src.phase;
+    const delayedTime = src.moving ? anchor + (emitted.tau - anchor) * phaseScale : carrierTime + (emitted.tau - t);
     let rec = state.audioPhaseBySource.get(src.id);
     if (!rec || emitted.tau < rec.tau || Math.abs(emitted.tau - rec.tau) > 0.05) {
-      rec = { tau: emitted.tau, phase: TWO_PI * src.frequency * emitted.tau * phaseScale + ph };
+      rec = { tau: emitted.tau, phase: TWO_PI * src.frequency * delayedTime + ph };
     } else {
-      rec.phase += TWO_PI * src.frequency * phaseScale * (emitted.tau - rec.tau);
+      rec.phase = TWO_PI * src.frequency * delayedTime + ph;
       rec.tau = emitted.tau;
     }
     state.audioPhaseBySource.set(src.id, rec);
