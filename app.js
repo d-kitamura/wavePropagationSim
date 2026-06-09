@@ -82,11 +82,14 @@ const presetLabels = {
 const state = {
   sources: [], probes: [], selectedSource: null, selectedProbe: null, mode: "source",
   time: 0, playing: true, lastFrame: performance.now(), nextId: 1, nextProbeId: 1,
+  simAnchorTime: 0, simAnchorWall: performance.now(),
   dragging: null, dragMoved: false, pointers: new Map(), pinching: false, pinchStartDistance: 0, pinchStartZoom: 1,
   soundSpeed: DEFAULT_C, timeScale: 0.01, viewZoom: FIELD_SIZE / 40,
   fieldCache: null, fieldCacheKey: "",
   audioCtx: null, audioNode: null, audioGain: null, audioInput: null, audioProbeId: null, audioNodes: [],
   audioDisplayTime: 0, audioPhaseBySource: new Map(), audioLastSample: 0, audioFadeSamples: 0, audioWorkletReady: false, audioWorkletUrl: null,
+  audioCtxAnchor: 0, audioSimAnchor: 0, audioTimeScale: 0.01,
+  audioScheduler: null, audioScheduledSources: [], audioNextStart: 0, audioEngine: "",
   probeTableDirty: true
 };
 
@@ -96,38 +99,32 @@ class ProbeAudioProcessor extends AudioWorkletProcessor {
     super();
     this.sources = [];
     this.probe = null;
-    this.time = 0;
-    this.targetTime = 0;
+    this.simAnchor = 0;
+    this.ctxAnchor = 0;
     this.timeScale = 0.01;
     this.soundSpeed = 340;
     this.fieldSize = 20.4;
     this.attenuation = "none";
     this.playing = true;
-    this.phases = new Map();
     this.fadeSamples = 0;
     this.port.onmessage = (ev) => {
       const d = ev.data || {};
       if (d.type === "config") {
         this.sources = d.sources || [];
         this.probe = d.probe || null;
+        this.simAnchor = typeof d.simAnchor === "number" ? d.simAnchor : (d.time || 0);
+        this.ctxAnchor = typeof d.ctxAnchor === "number" ? d.ctxAnchor : currentTime;
         this.timeScale = Math.max(0.001, d.timeScale || 0.01);
         this.soundSpeed = Math.max(1, d.soundSpeed || 340);
         this.fieldSize = d.fieldSize || 20.4;
         this.attenuation = d.attenuation || "none";
         this.playing = !!d.playing;
-        if (typeof d.time === "number") {
-          if (!this.probe || Math.abs(this.time - d.time) > 0.2) {
-            this.time = d.time;
-            this.phases.clear();
-            this.fadeSamples = 0;
-          }
-          this.targetTime = d.time;
-        }
-        const live = new Set(this.sources.map((s) => s.id));
-        for (const id of this.phases.keys()) if (!live.has(id)) this.phases.delete(id);
+        if (d.fade) this.fadeSamples = 0;
       }
       if (d.type === "sync") {
-        if (typeof d.time === "number") this.targetTime = d.time;
+        if (typeof d.simAnchor === "number") this.simAnchor = d.simAnchor;
+        if (typeof d.ctxAnchor === "number") this.ctxAnchor = d.ctxAnchor;
+        if (typeof d.timeScale === "number") this.timeScale = Math.max(0.001, d.timeScale);
         if (typeof d.playing === "boolean") this.playing = d.playing;
       }
     };
@@ -142,31 +139,55 @@ class ProbeAudioProcessor extends AudioWorkletProcessor {
 
   sourcePositionAt(src, t) {
     if (!src.moving) return { x: src.x, y: src.y };
-    const min = -this.fieldSize / 2;
-    const max = this.fieldSize / 2;
+    let min = -this.fieldSize / 2;
+    let max = this.fieldSize / 2;
     const span = max - min;
     const speed = Math.max(0, src.movingSpeed || 0);
     const start = src.motionStartX ?? src.x;
+    const startTime = src.motionStartTime ?? 0;
+    const elapsed = t - startTime;
+    if (elapsed <= 0) return { x: start, y: src.y, direction: src.motionDirection ?? src.movingDirection ?? 1, active: true };
+    if (src.motionMode === "oneWayLoop") {
+      min = src.motionMin ?? -20;
+      max = src.motionMax ?? 20;
+      const loopSpan = max - min;
+      const firstDistance = Math.max(0, max - start);
+      const firstTravelTime = firstDistance / Math.max(0.001, speed);
+      const travelTime = loopSpan / Math.max(0.001, speed);
+      const gapTime = src.motionGap ?? Math.min(0.3, Math.max(0.08, travelTime * 0.35));
+      if (elapsed <= firstTravelTime) {
+        const u = firstTravelTime <= 0 ? 1 : elapsed / firstTravelTime;
+        return { x: start + firstDistance * u, y: src.y, direction: 1, active: true };
+      }
+      const afterFirst = elapsed - firstTravelTime;
+      if (afterFirst <= gapTime) return { x: max, y: src.y, direction: 1, active: false };
+      const u = (afterFirst - gapTime) % (travelTime + gapTime);
+      if (u > travelTime) return { x: max, y: src.y, direction: 1, active: false };
+      return { x: min + loopSpan * (u / travelTime), y: src.y, direction: 1, active: true };
+    }
     const dir = src.motionDirection ?? src.movingDirection ?? 1;
-    let u = ((start - min) + dir * speed * t) % (2 * span);
+    let u = ((start - min) + dir * speed * elapsed) % (2 * span);
     if (u < 0) u += 2 * span;
     const x = u <= span ? min + u : max - (u - span);
-    return { x, y: src.y };
+    const direction = u <= span ? 1 : -1;
+    return { x, y: src.y, direction, active: true };
   }
 
   emissionState(src, x, y, t) {
     if (!src.moving) {
       const r = Math.hypot(x - src.x, y - src.y);
-      return { tau: t - r / this.soundSpeed, r };
+      return { tau: t - r / this.soundSpeed, r, active: true };
     }
     let tau = t;
     let r = 0;
+    let active = true;
     for (let i = 0; i < 8; i++) {
       const pos = this.sourcePositionAt(src, tau);
+      active = pos.active !== false;
       r = Math.hypot(x - pos.x, y - pos.y);
       tau = t - r / this.soundSpeed;
     }
-    return { tau, r };
+    return { tau, r, active };
   }
 
   normalization(t) {
@@ -174,6 +195,7 @@ class ProbeAudioProcessor extends AudioWorkletProcessor {
     let sum = 0;
     for (const s of this.sources) {
       const e = this.emissionState(s, this.probe.x, this.probe.y, t);
+      if (e.active === false) continue;
       sum += Math.abs((s.amplitude || 0) * this.atten(e.r));
     }
     return Math.max(0.2, sum);
@@ -185,35 +207,23 @@ class ProbeAudioProcessor extends AudioWorkletProcessor {
     let sum = 0;
     for (const s of this.sources) {
       const e = this.emissionState(s, this.probe.x, this.probe.y, t);
+      if (e.active === false) continue;
       const ph = s.control === "delay" ? -2 * Math.PI * s.frequency * s.delay : s.phase;
-      let rec = this.phases.get(s.id);
-      const tauStep = rec ? e.tau - rec.tau : 0;
-      if (!rec || tauStep < -1e-5 || Math.abs(tauStep) > 0.05) {
-        rec = { tau: e.tau, phase: 2 * Math.PI * s.frequency * e.tau * phaseScale + ph };
-      } else {
-        rec.phase += 2 * Math.PI * s.frequency * phaseScale * tauStep;
-        rec.tau = e.tau;
-      }
-      this.phases.set(s.id, rec);
-      sum += (s.amplitude || 0) * this.atten(e.r) * Math.sin(rec.phase);
+      sum += (s.amplitude || 0) * this.atten(e.r) * Math.sin(2 * Math.PI * s.frequency * e.tau * phaseScale + ph);
     }
     return sum / this.normalization(t);
   }
 
   process(_inputs, outputs) {
     const out = outputs[0][0];
-    const simStep = Math.max(0.001, this.timeScale) / sampleRate;
-    const error = this.targetTime - this.time;
-    const correction = Math.max(-simStep * 0.02, Math.min(simStep * 0.02, error / Math.max(1, out.length)));
-    const step = Math.max(simStep * 0.95, simStep + correction);
     for (let i = 0; i < out.length; i++) {
       if (!this.playing || !this.probe) {
         out[i] = 0;
         continue;
       }
-      this.time += step;
+      const t = this.simAnchor + (currentTime + i / sampleRate - this.ctxAnchor) * this.timeScale;
       const fade = Math.min(1, this.fadeSamples / (sampleRate * 0.02));
-      const v = Math.max(-0.95, Math.min(0.95, this.sampleAt(this.time)));
+      const v = Math.max(-0.95, Math.min(0.95, this.sampleAt(t)));
       out[i] = v * fade;
       this.fadeSamples++;
     }
@@ -236,6 +246,28 @@ const USE_AUDIO_WORKLET = false;
 function invalidateField() { state.fieldCache = null; }
 function markProbeTableDirty() { state.probeTableDirty = true; }
 
+function anchorSimClock() {
+  state.simAnchorTime = state.time;
+  state.simAnchorWall = performance.now();
+  state.lastFrame = state.simAnchorWall;
+}
+
+function resetAudioTimeline(fade = false) {
+  if (!state.audioCtx) return;
+  for (const src of state.audioScheduledSources) {
+    try { src.stop(); } catch (_) {}
+    try { src.disconnect(); } catch (_) {}
+  }
+  state.audioScheduledSources = [];
+  state.audioSimAnchor = currentSimTimeEstimate();
+  state.audioCtxAnchor = state.audioCtx.currentTime;
+  state.audioTimeScale = state.timeScale;
+  state.audioDisplayTime = state.audioSimAnchor;
+  state.audioPhaseBySource.clear();
+  if (fade) state.audioFadeSamples = 0;
+  state.audioNextStart = state.audioCtx.currentTime + 0.06;
+}
+
 function resetMovingSources() {
   for (const s of state.sources) {
     if (!s.moving) continue;
@@ -252,28 +284,31 @@ function resetMovingSources() {
 }
 
 function setTimeScale(value) {
+  state.time = currentSimTimeEstimate();
   state.timeScale = Math.max(0.001, Math.min(Number(ui.timeScale.max) || 1, Number(value) || 0.01));
+  anchorSimClock();
+  resetAudioTimeline(false);
   ui.timeScale.value = state.timeScale;
   ui.timeScaleValue.textContent = `${state.timeScale.toFixed(3)}x`;
   updateAudioStatus();
   postAudioConfig();
+  scheduleBufferedAudio();
 }
 
 function resetTime() {
   state.time = 0;
+  anchorSimClock();
   resetMovingSources();
   for (const p of state.probes) p.history = [];
-  state.audioDisplayTime = currentSimTimeEstimate();
-  state.audioPhaseBySource.clear();
-  state.audioFadeSamples = 0;
+  resetAudioTimeline(true);
   invalidateField();
   postAudioConfig();
+  scheduleBufferedAudio();
 }
 
 function currentSimTimeEstimate() {
   if (!state.playing) return state.time;
-  const dt = Math.min(0.25, (performance.now() - state.lastFrame) / 1000);
-  return state.time + dt * state.timeScale;
+  return state.simAnchorTime + (performance.now() - state.simAnchorWall) / 1000 * state.timeScale;
 }
 
 function resizeCanvases() {
@@ -747,14 +782,17 @@ function drawSpectrum() {
     const left = 48 * devicePixelRatio, right = 10 * devicePixelRatio, top = topPx + 12 * devicePixelRatio, bottom = 44 * devicePixelRatio;
     const pw = w - left - right, gh = ph - 56 * devicePixelRatio;
     const base = top + gh;
-    const data = p.history.slice(-128);
-    const duration = data.length > 1 ? data[data.length - 1].t - data[0].t : 0;
-    const fs = duration > 0 ? (data.length - 1) / duration : 1;
+    const maxSourceFreq = Math.max(DEFAULT_SOURCE_FREQ, ...activeSources().map((s) => s.frequency || 0));
+    const maxAnalysisFreq = Math.max(2000, maxSourceFreq * 1.5);
+    const n = 256;
+    const fs = maxAnalysisFreq * 2;
+    const duration = n / fs;
     const mags = [];
 
-    if (data.length >= 16 && duration > 0) {
-      const values = data.map((s) => s.v);
-      const n = values.length;
+    if (state.probes.length && activeSources().length) {
+      const end = state.time;
+      const start = end - duration;
+      const values = Array.from({ length: n }, (_, i) => pressureAt(p.x, p.y, start + i / fs));
       for (let k = 1; k < n / 2; k++) {
         let re = 0, im = 0;
         for (let i = 0; i < n; i++) {
@@ -846,7 +884,8 @@ function updateAudioStatus() {
   }
   const index = state.probes.findIndex((p) => p.id === state.audioProbeId);
   const pitchScale = Math.max(1, 1 / Math.max(0.001, state.timeScale));
-  ui.audioStatus.textContent = index >= 0 ? `${dict.playing}: P${index + 1} (${pitchScale.toFixed(0)}x pitch)` : dict.audioStopped;
+  const engine = state.audioEngine ? `, ${state.audioEngine}` : "";
+  ui.audioStatus.textContent = index >= 0 ? `${dict.playing}: P${index + 1} (${pitchScale.toFixed(0)}x pitch${engine})` : dict.audioStopped;
 }
 
 function syncSelected() {
@@ -985,9 +1024,8 @@ function updateStatus() {
 }
 
 function frame(now) {
-  const dt = Math.min(0.25, (now - state.lastFrame) / 1000);
   state.lastFrame = now;
-  if (state.playing) { state.time += dt * state.timeScale; animateMoving(); }
+  if (state.playing) { state.time = state.simAnchorTime + (now - state.simAnchorWall) / 1000 * state.timeScale; animateMoving(); }
   updateProbeHistories();
   drawField(); drawOverlay(); drawAxes(); drawScope(); drawSpectrum();
   if (state.probeTableDirty) drawProbeTable();
@@ -997,6 +1035,12 @@ function frame(now) {
 }
 
 function stopAudio() {
+  if (state.audioScheduler) { clearInterval(state.audioScheduler); state.audioScheduler = null; }
+  for (const src of state.audioScheduledSources) {
+    try { src.stop(); } catch (_) {}
+    try { src.disconnect(); } catch (_) {}
+  }
+  state.audioScheduledSources = [];
   if (state.audioNode) { state.audioNode.disconnect(); state.audioNode.onaudioprocess = null; state.audioNode = null; }
   if (state.audioInput) { try { state.audioInput.stop(); } catch (_) {} state.audioInput.disconnect(); state.audioInput = null; }
   for (const item of state.audioNodes) {
@@ -1011,10 +1055,83 @@ function stopAudio() {
   state.audioPhaseBySource.clear();
   state.audioLastSample = 0;
   state.audioFadeSamples = 0;
+  state.audioEngine = "";
   drawProbeTable();
 }
 
-function audioSnapshot(probe) {
+function cleanupScheduledSources() {
+  if (!state.audioCtx) return;
+  const now = state.audioCtx.currentTime;
+  state.audioScheduledSources = state.audioScheduledSources.filter((src) => {
+    if ((src._stopTime ?? 0) > now - 0.1) return true;
+    try { src.disconnect(); } catch (_) {}
+    return false;
+  });
+}
+
+function makeAudioBuffer(probe, startTime, duration) {
+  const sr = state.audioCtx.sampleRate;
+  const length = Math.max(1, Math.ceil(duration * sr));
+  const buffer = state.audioCtx.createBuffer(1, length, sr);
+  const data = buffer.getChannelData(0);
+  const audioTimeScale = Math.max(0.001, state.audioTimeScale || state.timeScale);
+  const pitchScale = Math.max(1, 1 / audioTimeScale);
+  for (let i = 0; i < length; i++) {
+    const audioTime = startTime + i / sr;
+    const simTime = state.audioSimAnchor + (audioTime - state.audioCtxAnchor) * audioTimeScale;
+    const norm = audioNormalizationAt(probe, simTime);
+    let v = audiblePressureAt(probe.x, probe.y, simTime, pitchScale) / norm;
+    if (state.audioFadeSamples < sr * 0.02) {
+      v *= state.audioFadeSamples / (sr * 0.02);
+      state.audioFadeSamples += 1;
+    }
+    data[i] = Math.max(-0.95, Math.min(0.95, v));
+  }
+  return buffer;
+}
+
+function scheduleBufferedAudio() {
+  if (!state.audioCtx || !state.audioProbeId || !state.audioGain) return;
+  const probe = state.probes.find((p) => p.id === state.audioProbeId);
+  if (!probe) { stopAudio(); return; }
+  cleanupScheduledSources();
+  if (!state.playing) {
+    state.audioNextStart = state.audioCtx.currentTime + 0.08;
+    return;
+  }
+  const chunk = 2.0;
+  const ahead = 6.0;
+  const now = state.audioCtx.currentTime;
+  if (!state.audioNextStart || state.audioNextStart < now + 0.04) state.audioNextStart = now + 0.06;
+  while (state.audioNextStart < now + ahead) {
+    const buffer = makeAudioBuffer(probe, state.audioNextStart, chunk);
+    const src = state.audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(state.audioGain);
+    src.start(state.audioNextStart);
+    src._stopTime = state.audioNextStart + buffer.duration;
+    state.audioScheduledSources.push(src);
+    state.audioNextStart += chunk;
+  }
+}
+
+function restartAudioBufferForCurrentProbe() {
+  if (state.audioEngine !== "buffer" || !state.audioProbeId || !state.audioGain) return;
+  resetAudioTimeline(true);
+  scheduleBufferedAudio();
+}
+
+function startBufferedAudio(probe, gain) {
+  resetAudioTimeline(true);
+  state.audioEngine = "buffer";
+  state.audioGain = gain;
+  gain.connect(state.audioCtx.destination);
+  state.audioNextStart = state.audioCtx.currentTime + 0.06;
+  scheduleBufferedAudio();
+  state.audioScheduler = setInterval(scheduleBufferedAudio, 250);
+}
+
+function audioSnapshot(probe, fade = false) {
   return {
     probe: probe ? { x: probe.x, y: probe.y } : null,
     sources: activeSources().map((s) => ({
@@ -1036,11 +1153,14 @@ function audioSnapshot(probe) {
       movingSpeed: s.moving ? Number(ui.movingSpeed.value) : s.movingSpeed
     })),
     time: currentSimTimeEstimate(),
+    simAnchor: state.audioSimAnchor || currentSimTimeEstimate(),
+    ctxAnchor: state.audioCtxAnchor || state.audioCtx?.currentTime || 0,
     timeScale: state.timeScale,
     soundSpeed: state.soundSpeed,
     fieldSize: FIELD_SIZE,
     attenuation: ui.attenuation.value,
-    playing: state.playing
+    playing: state.playing,
+    fade
   };
 }
 
@@ -1055,16 +1175,21 @@ async function ensureAudioWorklet() {
   return true;
 }
 
-function postAudioConfig() {
+function postAudioConfig(fade = false) {
+  if ((!state.audioNode?.port || state.audioEngine === "buffer") && state.audioProbeId && state.audioGain) {
+    resetAudioTimeline(fade);
+    scheduleBufferedAudio();
+    return;
+  }
   if (!state.audioNode?.port || !state.audioProbeId) return;
   const probe = state.probes.find((p) => p.id === state.audioProbeId);
   if (!probe) { stopAudio(); return; }
-  state.audioNode.port.postMessage({ type: "config", ...audioSnapshot(probe) });
+  state.audioNode.port.postMessage({ type: "config", ...audioSnapshot(probe, fade) });
 }
 
 function syncAudioClock() {
   if (!state.audioNode?.port || !state.audioProbeId) return;
-  state.audioNode.port.postMessage({ type: "sync", time: currentSimTimeEstimate(), playing: state.playing });
+  state.audioNode.port.postMessage({ type: "sync", playing: state.playing });
 }
 
 async function playProbe(id) {
@@ -1090,10 +1215,17 @@ async function playProbe(id) {
   try {
     if (await ensureAudioWorklet()) {
       const node = new AudioWorkletNode(state.audioCtx, "probe-audio-processor", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+      node.onprocessorerror = () => {
+        if (state.audioProbeId === id) {
+          state.audioWorkletReady = false;
+          playProbe(id);
+        }
+      };
       node.connect(gain);
       gain.connect(state.audioCtx.destination);
       state.audioNode = node;
-      postAudioConfig();
+      resetAudioTimeline(true);
+      postAudioConfig(true);
       drawProbeTable();
       return;
     }
@@ -1101,30 +1233,28 @@ async function playProbe(id) {
     state.audioWorkletReady = false;
   }
 
+  startBufferedAudio(probe, gain);
+  drawProbeTable();
+  return;
+
   const node = state.audioCtx.createScriptProcessor(4096, 1, 1);
   const input = state.audioCtx.createConstantSource();
   input.offset.value = 1e-6;
-  state.audioDisplayTime = currentSimTimeEstimate();
-  state.audioPhaseBySource.clear();
+  resetAudioTimeline(true);
   state.audioLastSample = 0;
-  state.audioFadeSamples = 0;
   node.onaudioprocess = (e) => {
     const out = e.outputBuffer.getChannelData(0);
     const sr = e.outputBuffer.sampleRate;
     const p = state.probes.find((x) => x.id === state.audioProbeId);
-    const pitchScale = Math.max(1, 1 / Math.max(0.001, state.timeScale));
-    const simStep = state.timeScale / sr;
-    const outputLatency = ((state.audioCtx?.baseLatency || 0) + out.length / sr) * state.timeScale;
-    const targetTime = currentSimTimeEstimate() + outputLatency;
-    const syncError = targetTime - state.audioDisplayTime;
-    const correction = Math.max(-simStep * 0.05, Math.min(simStep * 0.05, syncError / Math.max(1, out.length)));
-    const displayStep = Math.max(simStep * 0.9, simStep + correction);
+    const audioTimeScale = Math.max(0.001, state.audioTimeScale || state.timeScale);
+    const pitchScale = Math.max(1, 1 / audioTimeScale);
+    const blockTime = Number.isFinite(e.playbackTime) ? e.playbackTime : state.audioCtx.currentTime;
     for (let i = 0; i < out.length; i++) {
       if (!p) { out[i] = 0; continue; }
       if (!state.playing) { state.audioLastSample *= 0.98; out[i] = state.audioLastSample; continue; }
-      state.audioDisplayTime += displayStep;
+      state.audioDisplayTime = state.audioSimAnchor + (blockTime + i / sr - state.audioCtxAnchor) * audioTimeScale;
       const norm = audioNormalizationAt(p, state.audioDisplayTime);
-      const v = audiblePressureStep(p.x, p.y, state.audioDisplayTime, pitchScale) / norm;
+      const v = audiblePressureAt(p.x, p.y, state.audioDisplayTime, pitchScale) / norm;
       const fade = Math.min(1, state.audioFadeSamples / (sr * 0.02));
       state.audioLastSample = Math.max(-0.95, Math.min(0.95, v)) * fade;
       state.audioFadeSamples += 1;
@@ -1196,7 +1326,17 @@ overlayCanvas.addEventListener("pointermove", (ev) => {
     if (s) { s.x = pos.x; s.y = pos.y; invalidateField(); syncSelected(); }
   } else {
     const p = state.probes.find((x) => x.id === state.dragging.id);
-    if (p) { p.x = pos.x; p.y = pos.y; p.history = []; markProbeTableDirty(); }
+    if (p) {
+      p.x = pos.x; p.y = pos.y; p.history = []; markProbeTableDirty();
+      if (state.audioProbeId === p.id && state.audioEngine === "buffer") {
+        for (const src of state.audioScheduledSources) {
+          try { src.stop(); } catch (_) {}
+          try { src.disconnect(); } catch (_) {}
+        }
+        state.audioScheduledSources = [];
+        state.audioNextStart = state.audioCtx ? state.audioCtx.currentTime + 0.06 : 0;
+      }
+    }
   }
 });
 
@@ -1208,6 +1348,10 @@ overlayCanvas.addEventListener("pointerup", (ev) => {
   if (!was && !state.dragging && !state.dragMoved) {
     if (state.mode === "source") addSource(pos.x, pos.y);
     else addProbe(pos.x, pos.y);
+  }
+  if (state.dragging?.type === "probe") {
+    const p = state.probes.find((x) => x.id === state.dragging.id);
+    if (p && state.audioProbeId === p.id) restartAudioBufferForCurrentProbe();
   }
   state.dragging = null; state.dragMoved = false;
 });
@@ -1290,8 +1434,16 @@ ui.probeTable.addEventListener("click", (ev) => {
 ui.audioVolume.oninput = () => {
   if (state.audioGain) state.audioGain.gain.value = Number(ui.audioVolume.value);
 };
-ui.playPauseBtn.onclick = () => { state.playing = !state.playing; ui.playPauseBtn.textContent = state.playing ? labels[ui.languageSelect.value].pause : labels[ui.languageSelect.value].play; syncAudioClock(); };
-ui.stepBtn.onclick = () => { if (!state.playing) { state.time += 1 / 60 * state.timeScale; updateProbeHistories(true); } };
+ui.playPauseBtn.onclick = () => {
+  state.time = currentSimTimeEstimate();
+  state.playing = !state.playing;
+  anchorSimClock();
+  resetAudioTimeline(false);
+  ui.playPauseBtn.textContent = state.playing ? labels[ui.languageSelect.value].pause : labels[ui.languageSelect.value].play;
+  postAudioConfig(false);
+  scheduleBufferedAudio();
+};
+ui.stepBtn.onclick = () => { if (!state.playing) { state.time += 1 / 60 * state.timeScale; anchorSimClock(); resetAudioTimeline(false); updateProbeHistories(true); } };
 ui.resetBtn.onclick = resetTime;
 ui.languageSelect.onchange = applyLanguage;
 
