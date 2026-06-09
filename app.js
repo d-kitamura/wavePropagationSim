@@ -1390,7 +1390,17 @@ overlayCanvas.addEventListener("pointermove", (ev) => {
   state.dragMoved = true;
   if (state.dragging.type === "source") {
     const s = state.sources.find((x) => x.id === state.dragging.id);
-    if (s) { s.x = pos.x; s.y = pos.y; invalidateField(); syncSelected(); }
+    if (s) {
+      s.x = pos.x; s.y = pos.y; invalidateField(); syncSelected();
+      if (state.audioProbeId && state.audioEngine === "buffer") {
+        for (const src of state.audioScheduledSources) {
+          try { src.stop(); } catch (_) {}
+          try { src.disconnect(); } catch (_) {}
+        }
+        state.audioScheduledSources = [];
+        state.audioNextStart = state.audioCtx ? state.audioCtx.currentTime + 0.06 : 0;
+      }
+    }
   } else {
     const p = state.probes.find((x) => x.id === state.dragging.id);
     if (p) {
@@ -1420,6 +1430,7 @@ overlayCanvas.addEventListener("pointerup", (ev) => {
     const p = state.probes.find((x) => x.id === state.dragging.id);
     if (p && state.audioProbeId === p.id) restartAudioBufferForCurrentProbe();
   }
+  if (state.dragging?.type === "source" && state.audioProbeId) restartAudioBufferForCurrentProbe();
   state.dragging = null; state.dragMoved = false;
 });
 
