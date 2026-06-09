@@ -7,9 +7,13 @@ const MOVING_PATH_MIN = -20;
 const MOVING_PATH_MAX = 20;
 const MAX_SOURCES = 40;
 const MAX_PROBES = 4;
-const GRID_INSTANT = 150;
+const GRID_INSTANT = 128;
 const GRID_STATIC = 96;
 const HISTORY = 360;
+const SPECTRUM_DRAW_INTERVAL_MS = 125;
+const AUDIO_BUFFER_CHUNK_SECONDS = 1.0;
+const AUDIO_BUFFER_AHEAD_SECONDS = 3.0;
+const AUDIO_SCHEDULER_INTERVAL_MS = 150;
 const EPS = 0.08;
 const TWO_PI = Math.PI * 2;
 
@@ -90,6 +94,7 @@ const state = {
   audioDisplayTime: 0, audioPhaseBySource: new Map(), audioLastSample: 0, audioFadeSamples: 0, audioWorkletReady: false, audioWorkletUrl: null,
   audioCtxAnchor: 0, audioSimAnchor: 0, audioTimeScale: 0.01,
   audioScheduler: null, audioScheduledSources: [], audioNextStart: 0, audioEngine: "",
+  spectrumLastDraw: 0,
   probeTableDirty: true
 };
 
@@ -573,6 +578,52 @@ function computeValues(mode, n) {
   return { vals, min, max, n };
 }
 
+function drawContours(vals, n, min, max, mode) {
+  if (!ui.contours.checked) return;
+  const levels = mode === "instant"
+    ? [0]
+    : Array.from({ length: 7 }, (_, i) => min + (max - min) * (i + 1) / 8);
+  const sx = fieldCanvas.width / (n - 1);
+  const sy = fieldCanvas.height / (n - 1);
+  const edgePoint = (x1, y1, v1, x2, y2, v2, level) => {
+    if (v1 === v2) return null;
+    const t = Math.max(0, Math.min(1, (level - v1) / (v2 - v1)));
+    return { x: (x1 + (x2 - x1) * t) * sx, y: (y1 + (y2 - y1) * t) * sy };
+  };
+  const crosses = (a, b, level) => (a <= level && b > level) || (a > level && b <= level);
+
+  fctx.save();
+  fctx.lineWidth = Math.max(1, devicePixelRatio);
+  fctx.strokeStyle = mode === "instant" ? "rgba(255,255,255,.82)" : "rgba(255,255,255,.55)";
+  fctx.shadowColor = "rgba(0,0,0,.65)";
+  fctx.shadowBlur = 2 * devicePixelRatio;
+  for (const level of levels) {
+    fctx.beginPath();
+    for (let j = 0; j < n - 1; j++) {
+      for (let i = 0; i < n - 1; i++) {
+        const v00 = vals[j * n + i], v10 = vals[j * n + i + 1];
+        const v11 = vals[(j + 1) * n + i + 1], v01 = vals[(j + 1) * n + i];
+        const pts = [];
+        if (crosses(v00, v10, level)) pts.push(edgePoint(i, j, v00, i + 1, j, v10, level));
+        if (crosses(v10, v11, level)) pts.push(edgePoint(i + 1, j, v10, i + 1, j + 1, v11, level));
+        if (crosses(v01, v11, level)) pts.push(edgePoint(i, j + 1, v01, i + 1, j + 1, v11, level));
+        if (crosses(v00, v01, level)) pts.push(edgePoint(i, j, v00, i, j + 1, v01, level));
+        const clean = pts.filter(Boolean);
+        if (clean.length >= 2) {
+          fctx.moveTo(clean[0].x, clean[0].y);
+          fctx.lineTo(clean[1].x, clean[1].y);
+        }
+        if (clean.length >= 4) {
+          fctx.moveTo(clean[2].x, clean[2].y);
+          fctx.lineTo(clean[3].x, clean[3].y);
+        }
+      }
+    }
+    fctx.stroke();
+  }
+  fctx.restore();
+}
+
 function drawField() {
   resizeCanvases();
   const mode = ui.displayMode.value, n = mode === "instant" ? GRID_INSTANT : GRID_STATIC;
@@ -604,6 +655,7 @@ function drawField() {
   off.getContext("2d").putImageData(img, 0, 0);
   fctx.imageSmoothingEnabled = true;
   fctx.drawImage(off, 0, 0, fieldCanvas.width, fieldCanvas.height);
+  drawContours(vals, n, min, max, mode);
   ui.legendMin.textContent = mode === "spl" ? `${min.toFixed(0)} dB` : min.toFixed(2);
   ui.legendMax.textContent = mode === "spl" ? `${max.toFixed(0)} dB` : max.toFixed(2);
 }
@@ -765,7 +817,11 @@ function drawSpectrum() {
   const panelH = 150, count = Math.max(1, state.probes.length);
   const dw = Math.floor((spectrumCanvas.clientWidth || 520) * devicePixelRatio);
   const dh = panelH * count * devicePixelRatio;
-  if (spectrumCanvas.width !== dw || spectrumCanvas.height !== dh) { spectrumCanvas.width = dw; spectrumCanvas.height = dh; }
+  const resized = spectrumCanvas.width !== dw || spectrumCanvas.height !== dh;
+  if (resized) { spectrumCanvas.width = dw; spectrumCanvas.height = dh; }
+  const now = performance.now();
+  if (!resized && now - state.spectrumLastDraw < SPECTRUM_DRAW_INTERVAL_MS) return;
+  state.spectrumLastDraw = now;
 
   spctx.clearRect(0, 0, spectrumCanvas.width, spectrumCanvas.height);
   spctx.font = `${12 * devicePixelRatio}px sans-serif`;
@@ -966,6 +1022,7 @@ function lineSources(vertical, n, length) {
 
 function loadPreset(name) {
   if (!name) return;
+  if (state.audioProbeId) stopAudio();
   clearSources();
   if (name === "moving" && state.timeScale < 0.2) setTimeScale(0.2);
   const lambda = state.soundSpeed / DEFAULT_SOURCE_FREQ, add = (x, y, o) => addSource(x, y, o);
@@ -1002,6 +1059,8 @@ function applyBeamSteering() {
     s.control = mode; s.delay = d; s.phase = -TWO_PI * s.frequency * d;
   }
   invalidateField(); syncSelected(); renderSourceList();
+  postAudioConfig();
+  restartAudioBufferForCurrentProbe();
 }
 
 function animateMoving() {
@@ -1099,8 +1158,8 @@ function scheduleBufferedAudio() {
     state.audioNextStart = state.audioCtx.currentTime + 0.08;
     return;
   }
-  const chunk = 2.0;
-  const ahead = 6.0;
+  const chunk = AUDIO_BUFFER_CHUNK_SECONDS;
+  const ahead = AUDIO_BUFFER_AHEAD_SECONDS;
   const now = state.audioCtx.currentTime;
   if (!state.audioNextStart || state.audioNextStart < now + 0.04) state.audioNextStart = now + 0.06;
   while (state.audioNextStart < now + ahead) {
@@ -1128,7 +1187,7 @@ function startBufferedAudio(probe, gain) {
   gain.connect(state.audioCtx.destination);
   state.audioNextStart = state.audioCtx.currentTime + 0.06;
   scheduleBufferedAudio();
-  state.audioScheduler = setInterval(scheduleBufferedAudio, 250);
+  state.audioScheduler = setInterval(scheduleBufferedAudio, AUDIO_SCHEDULER_INTERVAL_MS);
 }
 
 function audioSnapshot(probe, fade = false) {
